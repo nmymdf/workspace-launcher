@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.2"
+APP_VERSION = "v0.3"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -377,6 +377,46 @@ def place_window(hwnd, x, y, w, h):
     dl, dt, dr, db = frame_adjust(hwnd)
     user32.SetWindowPos(hwnd, None, x - dl, y - dt, w + dl + dr, h + dt + db,
                         0x0004 | 0x0010 | 0x0040)
+
+
+def window_rect(hwnd):
+    """視窗實際看得到的範圍 (x, y, w, h)；不是 Windows 回傳 None。"""
+    if not IS_WIN:
+        return None
+    try:
+        e = wt.RECT()
+        if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(e), ctypes.sizeof(e)) != 0:
+            user32.GetWindowRect(hwnd, ctypes.byref(e))
+        return e.left, e.top, e.right - e.left, e.bottom - e.top
+    except Exception:
+        return None
+
+
+SHELL_CLASSES = ("Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd")
+
+
+def minimize_others(exclude=()):
+    """把除了 exclude 以外、目前沒縮小的視窗全部縮到工作列，回傳被縮的視窗清單。"""
+    if not IS_WIN:
+        return []
+    done = []
+    for h, title, cls, pid in list_windows():
+        if h in exclude or cls in SHELL_CLASSES or user32.IsIconic(h):
+            continue
+        user32.ShowWindow(h, 7)      # SW_SHOWMINNOACTIVE
+        done.append(h)
+    return done
+
+
+def restore_windows(hwnds):
+    if not IS_WIN:
+        return
+    for h in reversed(list(hwnds)):
+        try:
+            if user32.IsWindow(h) and user32.IsIconic(h):
+                user32.ShowWindow(h, 9)  # SW_RESTORE
+        except Exception:
+            pass
 
 
 def own_hwnd(root):
@@ -815,7 +855,7 @@ def make_palette(dark, accent=None):
 
 
 GLYPH = {"play": "", "arrange": "", "move": "", "trash": "", "gear": "",
-         "refresh": "", "compact": "", "expand": "", "back": ""}
+         "refresh": "", "desk": "", "undo": "", "back": ""}
 LOGO_COLORS = ["#4C8DF6", "#E0B03A", "#3FB68B", "#8A93A6"]
 
 
@@ -878,6 +918,7 @@ class FlatButton(tk.Canvas):
     def __init__(self, parent, app, text="", glyph="", tip="", command=None, primary=False, bg=None, minw=0):
         P = app.pal
         self.app, self.command, self.primary, self.tip = app, command, primary, tip
+        self.fixed_text, self.minw = text, minw
         self.icon = GLYPH.get(glyph, "") if (glyph and app.icon_font) else ""
         self.label = text or ("" if self.icon else tip)
         pad, gap = int(11 * app.scale), int(6 * app.scale)
@@ -891,6 +932,23 @@ class FlatButton(tk.Canvas):
         self.bind("<Enter>", self.on_enter)
         self.bind("<Leave>", self.on_leave)
         self.bind("<ButtonRelease-1>", self.on_click)
+        self.draw()
+
+    def relook(self, text=None, glyph=None, tip=None):
+        """換文字／圖案／提示（例如「顯示桌面」↔「還原視窗」）。"""
+        app = self.app
+        if tip is not None:
+            self.tip = tip
+        if glyph is not None:
+            self.icon = GLYPH.get(glyph, "") if (glyph and app.icon_font) else ""
+        if text is not None:
+            self.fixed_text = text
+        self.label = self.fixed_text or ("" if self.icon else self.tip)
+        pad, gap = int(11 * app.scale), int(6 * app.scale)
+        self.wic = app.icon_font.measure(self.icon) if self.icon else 0
+        self.wtx = app.font_small.measure(self.label) if self.label else 0
+        self.gap = gap if (self.icon and self.label) else 0
+        self.config(width=max(self.minw, pad * 2 + self.wic + self.gap + self.wtx))
         self.draw()
 
     def draw(self):
@@ -1082,14 +1140,17 @@ class App:
         self.pal = make_palette(self.dark, self.accent)
         root.title("%s %s" % (APP_NAME, APP_VERSION))
         root.geometry(self.cfg.get("geometry") or "760x600")
-        root.minsize(400, 90)
+        root.minsize(240, 130)
         self.set_icon()
         self.setup_fonts()
         self.tip = Tip(self)
         self.setup_style()
         self.build_ui()
         self.refresh_all()
-        self.set_compact(self.cfg.get("compact", False), initial=True)
+        self.hidden_wins = []
+        self.lay = None
+        root.bind("<Configure>", self.on_root_conf, add="+")
+        self.apply_layout()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind_all("<ButtonPress-1>", self.on_any_click, add="+")
         root.after(300, self.after_mapped)
@@ -1128,8 +1189,7 @@ class App:
             pass
 
     def on_close(self):
-        if not self.cfg.get("compact"):
-            self.cfg["geometry"] = self.root.geometry()
+        self.cfg["geometry"] = self.root.geometry()
         self.save()
         self.root.destroy()
 
@@ -1170,7 +1230,8 @@ class App:
         self.build_ui()
         self.refresh_all()
         self.set_status(self.status_text)
-        self.set_compact(self.cfg.get("compact", False), initial=True)
+        self.lay = None
+        self.apply_layout()
 
     # ---- 字型與樣式 ----
     def setup_fonts(self):
@@ -1242,40 +1303,37 @@ class App:
         tk.Frame(self.bottom, height=1, bg=P["bd"]).pack(fill="x")
         row = tk.Frame(self.bottom, bg=P["bg"])
         row.pack(fill="x")
-        self.status = tk.Label(row, text=self.status_text, anchor="w", bg=P["bg"], fg=P["mut"], font=self.font_small)
-        self.status.pack(side="left", padx=12, pady=5)
         tk.Label(row, text="%s　%s" % (AUTHOR, APP_VERSION), bg=P["bg"], fg=P["gold"],
                  font=self.font_italic).pack(side="right", padx=12)
+        self.status = tk.Label(row, text=self.status_text, anchor="w", bg=P["bg"], fg=P["mut"], font=self.font_small)
+        self.status.pack(side="left", padx=12, pady=5)
 
         self.tb = tk.Frame(r, bg=P["bg"])
         self.tb.pack(side="top", fill="x")
-        self.logo(self.tb).pack(side="left", padx=(12, 8), pady=8)
-        tk.Label(self.tb, text="工作清單", bg=P["bg"], fg=P["tx"], font=self.font_bold).pack(side="left")
-        FlatButton(self.tb, self, text="全部開啟並排列", glyph="play", tip="全部開啟並排列", command=self.run_all,
-                   primary=True).pack(side="right", padx=(3, 12), pady=8)
-        for glyph, tip, cmd in (("gear", "設定", self.show_settings), ("compact", "精簡模式", lambda: self.set_compact(True)),
-                                ("trash", "刪除勾選", self.delete_checked), ("move", "移到其他清單", self.move_menu),
-                                ("arrange", "整理現有視窗", self.arrange_now)):
+        self.logo_c = self.logo(self.tb)
+        self.logo_c.pack(side="left", padx=(12, 8), pady=8)
+        self.ttl = tk.Label(self.tb, text="工作清單", bg=P["bg"], fg=P["tx"], font=self.font_bold)
+        self.ttl.pack(side="left")
+        self.btn_run = FlatButton(self.tb, self, text="全部開啟並排列", glyph="play", tip="全部開啟並排列",
+                                  command=self.run_all, primary=True)
+        self.btn_run.pack(side="right", padx=(3, 12), pady=8)
+        for glyph, tip, cmd in (("gear", "設定", self.show_settings), ("arrange", "整理現有視窗", self.arrange_now),
+                                ("desk", "顯示桌面", self.toggle_desk)):
             b = FlatButton(self.tb, self, glyph=glyph, tip=tip, command=cmd)
             b.pack(side="right", padx=3, pady=8)
-            if glyph == "move":
-                self.btn_move = b
+            if glyph == "desk":
+                self.btn_desk = b
+        self.cname = tk.Label(self.tb, text="", bg=P["bg"], fg=P["ac"], font=self.font_bold, cursor="hand2")
+        self.cname.bind("<Button-1>", self.list_menu)
         self.tb_line = tk.Frame(r, height=1, bg=P["bd"])
         self.tb_line.pack(side="top", fill="x")
-
-        self.cbar = tk.Frame(r, bg=P["bg"])
-        self.cname = tk.Label(self.cbar, text="", bg=P["bg"], fg=P["tx"], font=self.font_bold)
-        self.cname.pack(side="left", padx=12, pady=10)
-        FlatButton(self.cbar, self, glyph="expand", tip="展開", command=lambda: self.set_compact(False)).pack(side="right", padx=(3, 12))
-        FlatButton(self.cbar, self, text="全部開啟並排列", glyph="play", tip="全部開啟並排列", command=self.run_all,
-                   primary=True).pack(side="right", padx=3)
 
         self.main = tk.Frame(r, bg=P["bg"])
         self.main.pack(side="top", fill="both", expand=True)
         self.body = tk.Frame(self.main, bg=P["bg"])
         self.body.pack(fill="both", expand=True)
 
-        left = tk.Frame(self.body, width=int(116 * sc), bg=P["bg"])
+        left = self.left = tk.Frame(self.body, width=int(116 * sc), bg=P["bg"])
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
         self.lists = ttk.Treeview(left, columns=("grip", "name"), show="tree", selectmode="browse")
@@ -1288,9 +1346,11 @@ class App:
         self.lists.bind("<ButtonPress-1>", lambda e: self.on_press("lists", e))
         self.lists.bind("<B1-Motion>", lambda e: self.on_motion("lists", e))
         self.lists.bind("<ButtonRelease-1>", lambda e: self.on_release("lists", e))
-        tk.Frame(self.body, width=1, bg=P["bd"]).pack(side="left", fill="y")
+        self.left_sep = tk.Frame(self.body, width=1, bg=P["bd"])
+        self.left_sep.pack(side="left", fill="y")
+        self.lists.bind("<Button-3>", self.on_list_rclick)
 
-        right = tk.Frame(self.body, bg=P["bg"])
+        right = self.right = tk.Frame(self.body, bg=P["bg"])
         right.pack(side="left", fill="both", expand=True)
 
         self.bot = tk.Frame(right, bg=P["bg"])
@@ -1300,7 +1360,7 @@ class App:
         self.pv_holder.grid(row=0, column=0, sticky="nsew")
         self.pv_holder.pack_propagate(False)
         cw = int(176 * sc)
-        ctl = tk.Frame(self.bot, bg=P["surf"], width=cw, height=int(152 * sc), highlightbackground=P["bd"],
+        ctl = self.ctl = tk.Frame(self.bot, bg=P["surf"], width=cw, height=int(152 * sc), highlightbackground=P["bd"],
                        highlightthickness=1)
         ctl.grid(row=0, column=1, sticky="ns", padx=(10, 0))
         ctl.pack_propagate(False)
@@ -1317,15 +1377,13 @@ class App:
         self.lbl_layout.pack(side="right")
         FlatButton(ctl, self, text="還原自動平分", glyph="refresh", tip="還原自動平分", command=self.restore_auto,
                    bg=P["surf"], minw=cw - 24).pack(padx=12, pady=2)
-        FlatButton(ctl, self, text="刪除此清單", glyph="trash", tip="刪除此清單", command=self.delete_list,
-                   bg=P["surf"], minw=cw - 24).pack(padx=12, pady=2)
 
-        tf = tk.Frame(right, bg=P["bg"])
+        tf = self.tf = tk.Frame(right, bg=P["bg"])
         tf.pack(side="top", fill="both", expand=True, padx=(10, 4), pady=(8, 0))
         tf.columnconfigure(0, weight=1)
         tf.rowconfigure(0, weight=1)
         self.tree = ttk.Treeview(tf, columns=COLS, show="headings", selectmode="browse")
-        for c, t, w, a, stretch in [("grip", "", 26, "center", False), ("chk", "", 32, "center", False),
+        for c, t, w, a, stretch in [("grip", "", 26, "center", False), ("chk", "執行", 38, "center", False),
                                     ("name", "名稱", 130, "w", True), ("type", "類型", 104, "w", False),
                                     ("path", "路徑／網址", 190, "w", True)]:
             self.tree.heading(c, text=t, anchor="w")
@@ -1401,7 +1459,7 @@ class App:
             self.lists.insert("", "end", iid=l["id"], values=("⋮⋮", l["name"]))
         self.lists.insert("", "end", iid=NEWLIST, values=("", "＋ 新增清單"), tags=("muted",))
         self.lists.selection_set(self.cfg["current"])
-        self.cname.config(text=self.cur_list()["name"])
+        self.cname.config(text=self.cur_list()["name"] + " ▾")
 
     def refresh_header(self):
         l = self.cur_list()
@@ -1551,18 +1609,64 @@ class App:
         if self.font.measure(text) > int(t.column(col, "width")) - 14:
             self.tip.schedule(e.x_root, e.y_root, text)
 
+    def menu(self):
+        P = self.pal
+        return tk.Menu(self.root, tearoff=0, bg=P["surf"], fg=P["tx"], activebackground=P["ac"],
+                       activeforeground=P["on_ac"])
+
     def on_rclick(self, e):
         row = self.tree.identify_row(e.y)
         it = self.find_item(row) if row and row != NEW else None
         if not it or it.get("kind") == "self":
             return
         self.select_item(row)
-        P = self.pal
-        m = tk.Menu(self.root, tearoff=0, bg=P["surf"], fg=P["tx"], activebackground=P["ac"], activeforeground=P["on_ac"])
+        m = self.menu()
         var = tk.IntVar(value=it.get("screen", 0))
         for v, label in ((0, "此項開在：跟隨清單"), (1, "此項開在：螢幕1"), (2, "此項開在：螢幕2")):
             m.add_radiobutton(label=label, variable=var, value=v, command=lambda v=v: self.set_item_screen(row, v))
+        others = [l for l in self.cfg["lists"] if l["id"] != self.cfg["current"]]
+        if others:
+            m.add_separator()
+            mv, cp = self.menu(), self.menu()
+            for l in others:
+                mv.add_command(label=l["name"], command=lambda x=l["id"]: self.transfer([row], x, False))
+                cp.add_command(label=l["name"], command=lambda x=l["id"]: self.transfer([row], x, True))
+            m.add_cascade(label="移到…", menu=mv)
+            m.add_cascade(label="複製到…", menu=cp)
+        m.add_separator()
+        m.add_command(label="刪除此項…", command=lambda: self.delete_item(row))
         m.tk_popup(e.x_root, e.y_root)
+
+    def delete_item(self, iid):
+        it = self.find_item(iid)
+        if not it or it.get("kind") == "self":
+            return
+        if not messagebox.askyesno(APP_NAME, "確定刪除「%s」？" % it["name"]):
+            return
+        l = self.cur_list()
+        l["items"] = [i for i in l["items"] if i["id"] != iid]
+        l["layout"] = "auto"
+        l["rects"] = {}
+        self.save()
+        self.refresh_all()
+        self.set_status("已刪除「%s」" % it["name"])
+
+    def on_list_rclick(self, e):
+        row = self.lists.identify_row(e.y)
+        if not row or row == NEWLIST:
+            return
+        m = self.menu()
+        m.add_command(label="重新命名", command=lambda: self.begin_list_edit(row))
+        m.add_separator()
+        m.add_command(label="刪除此清單…", command=lambda: self.delete_list(row))
+        m.tk_popup(e.x_root, e.y_root)
+
+    def list_menu(self, e=None):
+        m = self.menu()
+        for l in self.cfg["lists"]:
+            m.add_command(label=("● " if l["id"] == self.cfg["current"] else "    ") + l["name"],
+                          command=lambda x=l["id"]: self.switch_list(x))
+        m.tk_popup(self.cname.winfo_rootx(), self.cname.winfo_rooty() + self.cname.winfo_height())
 
     def set_item_screen(self, iid, v):
         it = self.find_item(iid)
@@ -1888,16 +1992,17 @@ class App:
         e.bind("<FocusOut>", commit)
         e.bind("<Escape>", lambda ev: (done.__setitem__("v", True), e.destroy()))
 
-    def delete_list(self):
+    def delete_list(self, lid=None):
         if len(self.cfg["lists"]) <= 1:
             messagebox.showinfo(APP_NAME, "至少要保留一份清單。")
             return
-        l = self.cur_list()
-        if not messagebox.askyesno(APP_NAME, "確定刪除清單「%s」？" % l["name"]):
+        l = next((x for x in self.cfg["lists"] if x["id"] == lid), None) if lid else self.cur_list()
+        if not l or not messagebox.askyesno(APP_NAME, "確定刪除清單「%s」？（裡面的項目也會一起刪除）" % l["name"]):
             return
         self.cfg["lists"].remove(l)
-        self.cfg["current"] = self.cfg["lists"][0]["id"]
-        self.sel_id = SELF_ID
+        if self.cfg["current"] == l["id"]:
+            self.cfg["current"] = self.cfg["lists"][0]["id"]
+            self.sel_id = SELF_ID
         self.save()
         self.refresh_all()
 
@@ -1954,41 +2059,6 @@ class App:
         self.refresh_header()
         self.refresh_preview()
 
-    # ---- 批次動作 ----
-    def checked_ids(self):
-        return [i["id"] for i in self.cur_list()["items"] if i.get("checked") and i.get("kind") != "self"]
-
-    def delete_checked(self):
-        ids = self.checked_ids()
-        if not ids:
-            self.set_status("先勾選要刪除的項目")
-            return
-        if not messagebox.askyesno(APP_NAME, "確定刪除勾選的 %d 個項目？" % len(ids)):
-            return
-        l = self.cur_list()
-        l["items"] = [i for i in l["items"] if i["id"] not in ids]
-        l["layout"] = "auto"
-        l["rects"] = {}
-        self.save()
-        self.refresh_all()
-        self.set_status("已刪除 %d 個項目" % len(ids))
-
-    def move_menu(self):
-        ids = self.checked_ids()
-        others = [l for l in self.cfg["lists"] if l["id"] != self.cfg["current"]]
-        if not ids or not others:
-            self.set_status("先勾選項目，且要有另一份清單")
-            return
-        P = self.pal
-        m = tk.Menu(self.root, tearoff=0, bg=P["surf"], fg=P["tx"], activebackground=P["ac"], activeforeground=P["on_ac"])
-        for l in others:
-            m.add_command(label="移到「%s」" % l["name"], command=lambda x=l["id"]: self.transfer(ids, x, False))
-        m.add_separator()
-        for l in others:
-            m.add_command(label="複製到「%s」" % l["name"], command=lambda x=l["id"]: self.transfer(ids, x, True))
-        b = self.btn_move
-        m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
-
     # ---- 執行與排列 ----
     def music_opts(self):
         return {"music_shuffle": self.cfg.get("music_shuffle", True), "music_sub": self.cfg.get("music_sub", True)}
@@ -2003,11 +2073,25 @@ class App:
             return
         m = monitor_for(s)
         x, y, w, h = r
+        target = (m["x"] + int(round(x * m["w"])), m["y"] + int(round(y * m["h"])),
+                  int(round(w * m["w"])), int(round(h * m["h"])))
         try:
-            place_window(hwnd, m["x"] + int(round(x * m["w"])), m["y"] + int(round(y * m["h"])),
-                         int(round(w * m["w"])), int(round(h * m["h"])))
+            place_window(hwnd, *target)
         except Exception:
-            pass
+            return
+        self.root.after(450, lambda: self.verify_place(hwnd, target, 3))
+
+    def verify_place(self, hwnd, target, tries):
+        """搬完再量一次，有的程式會自己改回大小或縮放，不對就重搬。"""
+        cur = window_rect(hwnd)
+        if cur is None or tries <= 0:
+            return
+        if any(abs(a - b) > 8 for a, b in zip(cur, target)):
+            try:
+                place_window(hwnd, *target)
+            except Exception:
+                return
+            self.root.after(450, lambda: self.verify_place(hwnd, target, tries - 1))
 
     def run_all(self):
         if self.busy:
@@ -2106,27 +2190,73 @@ class App:
             msg += "；沒找到已開啟的視窗：" + "、".join(skipped)
         self.set_status(msg)
 
-    # ---- 精簡模式／設定 ----
-    def set_compact(self, flag, initial=False):
-        self.end_edit(False)
-        if flag:
-            if not initial:
-                self.cfg["geometry"] = self.root.geometry()
-            self.tb.pack_forget()
-            self.tb_line.pack_forget()
-            self.main.pack_forget()
-            self.cbar.pack(side="top", fill="x")
-            if not initial:
-                self.root.geometry("%dx%d" % (min(max(self.root.winfo_width(), 400), 560), int(96 * self.scale)))
+    # ---- 視窗大小自動收／顯示桌面／設定 ----
+    def on_root_conf(self, e):
+        if e.widget is self.root:
+            self.apply_layout()
+
+    def apply_layout(self):
+        """視窗拖多小都能用：依寬高逐步收起次要的東西。"""
+        w, h = self.root.winfo_width(), self.root.winfo_height()
+        if w < 50:
+            return
+        sc = self.scale
+        mode = (w >= 700 * sc, w >= 560 * sc, h >= 380 * sc, w >= 520 * sc, w >= 400 * sc, w >= 440 * sc, w >= 330 * sc)
+        if mode == self.lay:
+            return
+        self.lay = mode
+        ctl_on, left_on, bot_on, type_on, path_on, run_txt, ttl_on = mode
+        if ctl_on:
+            self.ctl.grid(row=0, column=1, sticky="ns", padx=(10, 0))
         else:
-            self.cbar.pack_forget()
-            self.tb.pack(side="top", fill="x")
-            self.tb_line.pack(side="top", fill="x")
-            self.main.pack(side="top", fill="both", expand=True)
-            if not initial:
-                self.root.geometry(self.cfg.get("geometry") or "760x600")
-        self.cfg["compact"] = bool(flag)
-        self.save()
+            self.ctl.grid_remove()
+        if left_on:
+            self.cname.pack_forget()
+            if not self.left.winfo_ismapped():
+                self.left.pack(side="left", fill="y", before=self.right)
+                self.left_sep.pack(side="left", fill="y", before=self.right)
+        else:
+            self.left.pack_forget()
+            self.left_sep.pack_forget()
+            self.cname.pack(side="left", padx=(8, 0))
+        if bot_on:
+            if not self.bot.winfo_ismapped():
+                self.bot.pack(side="bottom", fill="x", padx=10, pady=(4, 10), before=self.tf)
+        else:
+            self.bot.pack_forget()
+        self.logo_c.pack_forget()
+        self.ttl.pack_forget()
+        if ttl_on:
+            self.logo_c.pack(side="left", padx=(12, 8), pady=8, before=self.btn_run)
+            self.ttl.pack(side="left", before=self.btn_run)
+        cols = ["grip", "chk", "name"] + (["type"] if type_on else []) + (["path"] if path_on and type_on else [])
+        self.tree.configure(displaycolumns=cols)
+        if run_txt:
+            self.btn_run.relook(text="全部開啟並排列")
+        else:
+            self.btn_run.relook(text="")
+
+    def toggle_desk(self):
+        if self.hidden_wins:
+            restore_windows(self.hidden_wins)
+            self.hidden_wins = []
+            self.btn_desk.relook(glyph="desk", tip="顯示桌面")
+            self.set_status("已還原視窗")
+            return
+        hw = own_hwnd(self.root)
+        done = minimize_others(set(EXCLUDE) | {hw})
+        if not done:
+            self.set_status("沒有其他視窗需要收起來")
+            return
+        self.hidden_wins = done
+        self.btn_desk.relook(glyph="undo", tip="還原視窗")
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except Exception:
+            pass
+        self.set_status("已收起 %d 個視窗，可從桌面拖捷徑進來；再按一次還原" % len(done))
 
     def show_settings(self):
         self.end_edit(False)

@@ -77,7 +77,7 @@ assert cb.get() == "資料夾", cb.get()
 app.end_edit(False)
 print("滾輪／↑ 不改值 ok")
 
-# 勾選與刪除前確認（把確認視窗換成自動回答）
+# 勾選＝執行；刪除只走右鍵（delete_item），刪前要確認
 import tkinter.messagebox as mb
 asked = []
 mb.askyesno = lambda *a, **k: (asked.append(a) or True)
@@ -87,9 +87,14 @@ app.tree.event_generate("<ButtonPress-1>", x=bb[0] + 5, y=bb[1] + 5); pump()
 app.tree.event_generate("<ButtonRelease-1>", x=bb[0] + 5, y=bb[1] + 5); pump()
 assert app.find_item(fid)["checked"] is False
 app.find_item(fid)["checked"] = True
-app.delete_checked()
-assert asked and len(app.cur_list()["items"]) == 1, app.cur_list()["items"]
-print("批次刪除要確認 ok")
+assert not hasattr(app, "delete_checked")
+n0 = len(app.cur_list()["items"])
+app.delete_item("self")
+assert len(app.cur_list()["items"]) == n0, "本工具不能刪"
+app.delete_item(fid)
+assert asked and "月報" not in asked[-1][1] and len(app.cur_list()["items"]) == n0 - 1 and app.find_item(fid) is None
+print("右鍵刪除單項要確認 ok")
+app.cur_list()["items"] = [i for i in app.cur_list()["items"] if i["id"] == "self"]; app.refresh_all(); pump()
 
 # 再補幾個項目，測拖曳排序／Alt+↑↓／換清單
 for p in (fdir, fx):
@@ -167,8 +172,32 @@ assert all(v[0] >= 1920 for v in placed.values())
 print("全部開啟並排列（螢幕2 座標）ok", app.status.cget("text"))
 
 # 精簡模式與設定
-app.set_compact(True); pump(); assert not app.main.winfo_ismapped() and app.cbar.winfo_ismapped()
-app.set_compact(False); pump(); assert app.main.winfo_ismapped()
+for geo in ("300x200", "240x130", "500x420", "1000x660"):
+    root.geometry(geo); pump(8)
+    assert app.main.winfo_ismapped() and app.btn_run.winfo_ismapped(), geo
+root.geometry("300x200"); pump(8)
+assert not app.left.winfo_ismapped() and not app.bot.winfo_ismapped() and app.cname.winfo_manager() == "pack"
+root.geometry("1000x660"); pump(8)
+assert app.left.winfo_ismapped() and app.bot.winfo_ismapped() and app.ctl.winfo_ismapped() and app.cname.winfo_manager() == ""
+print("視窗縮放自動收 ok")
+
+# 顯示桌面
+w.minimize_others = lambda ex=(): [11, 12]
+got = []
+w.restore_windows = lambda hs: got.extend(hs)
+app.toggle_desk(); assert app.hidden_wins == [11, 12]
+app.toggle_desk(); assert app.hidden_wins == [] and got == [11, 12]
+print("顯示桌面 ok")
+
+# 搬完檢查：實際位置不對就重搬
+calls = []
+w.place_window = lambda h, *r: calls.append(r)
+w.window_rect = lambda h: (0, 0, 500, 500)
+app.verify_place(5, (0, 0, 800, 600), 3); pump(); time.sleep(0.5); pump()
+assert len(calls) >= 1
+n = len(calls); w.window_rect = lambda h: (0, 0, 800, 600)
+app.verify_place(5, (0, 0, 800, 600), 3); assert len(calls) == n
+print("搬完檢查 ok")
 app.show_settings(); pump(); assert app.settings.winfo_ismapped() and app.var_auto.get() is False
 app.hide_settings(); pump(); assert app.body.winfo_ismapped()
 print("精簡／設定 ok")
