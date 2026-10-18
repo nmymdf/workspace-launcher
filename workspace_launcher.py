@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.4"
+APP_VERSION = "v0.5"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -98,6 +98,7 @@ def load_config(path=None):
     cfg.setdefault("autorun", "")
     cfg.setdefault("geometry", "")
     cfg.setdefault("music_shuffle", True)
+    cfg.setdefault("opened", {})
     cfg.setdefault("music_sub", True)
     if cfg.get("current") not in [l["id"] for l in cfg["lists"]]:
         cfg["current"] = cfg["lists"][0]["id"]
@@ -110,6 +111,18 @@ def save_config(cfg, path=None):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     os.replace(tmp, path)
+
+
+def log(msg):
+    """把動作和錯誤寫進 %APPDATA%\\WorkspaceLauncher\\log.txt，出問題時貼給作者看。"""
+    try:
+        path = os.path.join(os.path.dirname(cfg_path()), "log.txt")
+        if os.path.exists(path) and os.path.getsize(path) > 200000:
+            os.replace(path, path + ".old")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
 
 
 # ----------------------------------------------------------------------------
@@ -419,6 +432,41 @@ def restore_windows(hwnds):
             pass
 
 
+BROWSER_EXES = ("chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "vivaldi.exe", "opera.exe")
+PLAYER_EXES = ("microsoft.media.player.exe", "wmplayer.exe", "music.ui.exe", "vlc.exe")
+PLAYER_TITLES = ("媒體播放器", "media player", "windows media player", "groove")
+
+
+def window_exe(hwnd):
+    if not IS_WIN or not hwnd:
+        return ""
+    try:
+        pid = ctypes.c_uint(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return os.path.basename(proc_exe(pid.value)).lower()
+    except Exception:
+        return ""
+
+
+def is_browser_window(hwnd):
+    exe = window_exe(hwnd)
+    if not exe:
+        return False
+    d = os.path.basename(default_browser_exe() or "").lower()
+    return exe in BROWSER_EXES or (d and exe == d)
+
+
+def find_player(exclude=()):
+    """找媒體播放器視窗（新版媒體播放器、舊版 WMP、VLC）。"""
+    for h, title, cls, pid in list_windows():
+        if h in exclude:
+            continue
+        t = title.lower()
+        if t.startswith(PLAYER_TITLES) or t.endswith("vlc media player") or window_exe(h) in PLAYER_EXES:
+            return h
+    return None
+
+
 def window_alive(hwnd):
     if not IS_WIN or not hwnd:
         return False
@@ -710,10 +758,17 @@ def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
         files = music_files(p, opts.get("music_sub", True))
         if not files:
             raise RuntimeError("資料夾裡沒有音樂檔")
-        before = snapshot()
-        play_file(build_playlist(files, opts.get("music_shuffle", True)))
-        if info is not None:     # 記下播放器視窗，下次還開著就不重播
-            info["music"] = wait_new(before, 6, settle=0.5, exclude=exclude)
+        pl = build_playlist(files, opts.get("music_shuffle", True))
+        log("音樂：%s 找到 %d 首，播放清單 %s" % (p, len(files), pl))
+        play_file(pl)
+        if info is not None:     # 記下播放器視窗：之後放到螢幕2右下角、再按不重播
+            t0, h = time.time(), None
+            while time.time() - t0 < 10 and not h:
+                h = find_player(exclude)
+                if not h:
+                    time.sleep(0.4)
+            info["music"] = h
+            log("音樂：播放器視窗 %s" % h)
         return NOTILE
     if t in ("網址", "YouTube最新"):
         url = p
@@ -761,6 +816,21 @@ def set_autostart(on):
 # ----------------------------------------------------------------------------
 
 
+def looks_like_music(folder):
+    """資料夾裡大多是音樂檔（至少 3 個、佔 6 成以上）就當音樂資料夾。"""
+    n = a = 0
+    try:
+        for _, _, fs in os.walk(folder):
+            for f in fs:
+                n += 1
+                a += f.lower().endswith(AUDIO_EXT)
+            if n >= 400:
+                break
+    except OSError:
+        return False
+    return a >= 3 and a * 10 >= n * 6
+
+
 def guess_type(p):
     pl = p.lower()
     if pl.startswith(("http://", "https://", "www.")):
@@ -769,7 +839,7 @@ def guess_type(p):
         t, _ = fix_shortcut("App", p)
         return t if t in ("資料夾", "網址") else "App"
     if os.path.isdir(os.path.expandvars(p)):
-        return "資料夾"
+        return "音樂資料夾" if looks_like_music(os.path.expandvars(p)) else "資料夾"
     if pl.endswith((".exe", ".bat", ".cmd", ".com")):
         return "App"
     return "檔案"
@@ -1176,7 +1246,7 @@ class App:
         self.build_ui()
         self.refresh_all()
         self.hidden_wins = []
-        self.opened = {}      # {清單id: {項目id: hwnd}}：本工具自己開出來的視窗
+        self.opened = self.cfg.setdefault("opened", {})   # {清單id: {項目id: hwnd}}，存在設定檔，重開工具還記得
         self.music_win = {}   # {清單id: {項目id: hwnd}}：音樂播放器視窗（不會被「全部關閉」關掉）
         self.lay = None
         root.bind("<Configure>", self.on_root_conf, add="+")
@@ -1210,6 +1280,11 @@ class App:
             save_config(self.cfg, self.cfg_file)
         except Exception as ex:
             self.set_status("存檔失敗：%s" % ex)
+
+    def status_tip(self, e):
+        t = self.status_text
+        if t and self.font_small.measure(t) > self.status.winfo_width() - 4:
+            self.tip.schedule(e.x_root, e.y_root - 40, t)
 
     def set_status(self, text):
         self.status_text = text
@@ -1337,6 +1412,8 @@ class App:
                  font=self.font_italic).pack(side="right", padx=12)
         self.status = tk.Label(row, text=self.status_text, anchor="w", bg=P["bg"], fg=P["mut"], font=self.font_small)
         self.status.pack(side="left", padx=12, pady=5)
+        self.status.bind("<Enter>", self.status_tip)
+        self.status.bind("<Leave>", lambda e: self.tip.cancel())
 
         self.tb = tk.Frame(r, bg=P["bg"])
         self.tb.pack(side="top", fill="x")
@@ -1461,6 +1538,8 @@ class App:
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
         ttk.Checkbutton(self.settings, text="音樂資料夾：包含子資料夾", variable=self.var_sub,
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
+        FlatButton(self.settings, self, text="開啟紀錄檔資料夾", glyph="back", tip="開啟紀錄檔資料夾",
+                   command=self.open_log_dir).pack(anchor="w", padx=16, pady=(8, 0))
         FlatButton(self.settings, self, text="返回", glyph="back", tip="返回", command=self.hide_settings).pack(anchor="w", padx=16, pady=12)
 
     def logo(self, parent):
@@ -1664,8 +1743,24 @@ class App:
             m.add_cascade(label="移到…", menu=mv)
             m.add_cascade(label="複製到…", menu=cp)
         m.add_separator()
+        if it["type"] == "資料夾":
+            m.add_command(label="改成音樂資料夾", command=lambda: self.set_item_type(row, "音樂資料夾"))
+        elif it["type"] == "音樂資料夾":
+            m.add_command(label="改成一般資料夾", command=lambda: self.set_item_type(row, "資料夾"))
         m.add_command(label="刪除此項…", command=lambda: self.delete_item(row))
         m.tk_popup(e.x_root, e.y_root)
+
+    def set_item_type(self, iid, t):
+        it = self.find_item(iid)
+        if not it:
+            return
+        it["type"] = t
+        l = self.cur_list()
+        l["layout"] = "auto"
+        l["rects"] = {}
+        self.save()
+        self.refresh_all()
+        self.set_status("已改成「%s」" % t)
 
     def delete_item(self, iid):
         it = self.find_item(iid)
@@ -2111,6 +2206,20 @@ class App:
             return
         self.root.after(450, lambda: self.verify_place(hwnd, target, 3))
 
+    def place_music(self, hwnd):
+        """音樂播放器：固定小視窗，放螢幕2 右下角，不佔排版格子。"""
+        if not hwnd:
+            return
+        m = monitor_for(2)
+        w, h = int(480 * self.scale), int(220 * self.scale)
+        gap = int(12 * self.scale)
+        target = (m["x"] + m["w"] - w - gap, m["y"] + m["h"] - h - gap, w, h)
+        try:
+            place_window(hwnd, *target)
+        except Exception:
+            return
+        self.root.after(450, lambda: self.verify_place(hwnd, target, 3))
+
     def verify_place(self, hwnd, target, tries):
         """搬完再量一次，有的程式會自己改回大小或縮放，不對就重搬。"""
         cur = window_rect(hwnd)
@@ -2145,18 +2254,24 @@ class App:
             for it in items:
                 q.put(("status", "開啟：%s…" % it["name"]))
                 h0 = known.get(it["id"])
-                if it["type"] in ("網址", "YouTube最新") and h0 and h0 not in used and window_alive(h0):
+                if it["type"] in ("網址", "YouTube最新") and h0 and h0 not in used and window_alive(h0) \
+                        and is_browser_window(h0):
                     used.add(h0)                    # 上次開的瀏覽器視窗還在，只重新排版，不再開新的
                     q.put(("placed", it["id"], h0))
                     continue
                 if it["type"] in NOTILE_TYPES and window_alive(known_music.get(it["id"])):
-                    continue                        # 音樂播放器還開著，不重播
+                    q.put(("music", it["id"], known_music[it["id"]]))   # 播放器還開著：不重播，只放回角落
+                    log("音樂：播放器還開著，不重播")
+                    continue
                 try:
                     info = {}
                     h = open_item(it, used, opts, lambda cid, i=it: q.put(("cid", i["id"], cid)), info)
                 except Exception as ex:
                     failed.append("%s（%s）" % (it["name"], ex))
+                    log("失敗：%s [%s] %s -> %s" % (it["name"], it["type"], it["path"], ex))
                     continue
+                log("開啟：%s [%s] %s -> 視窗 %s%s" % (it["name"], it["type"], it["path"], h,
+                                                  "（本來就開著）" if info.get("reused") else ""))
                 if h == NOTILE:
                     if info.get("music"):
                         q.put(("music", it["id"], info["music"]))
@@ -2191,8 +2306,10 @@ class App:
                         self.place_one(l, msg[1], msg[2])
                     elif msg[0] == "music":
                         self.music_win.setdefault(l["id"], {})[msg[1]] = msg[2]
+                        self.place_music(msg[2])
                     elif msg[0] == "opened":
                         self.opened.setdefault(l["id"], {})[msg[1]] = msg[2]
+                        self.save()
                     elif msg[0] == "cid":
                         for i in l["items"]:
                             if i["id"] == msg[1]:
@@ -2218,13 +2335,26 @@ class App:
         self.set_status(msg)
 
     def close_targets(self):
-        """這份清單裡打勾、而且是本工具開出來、現在還開著的視窗。"""
+        """這份清單裡打勾的項目，現在開著的視窗（先看記下來的，沒有就用排版同樣的方式去找）。"""
         l = self.cur_list()
+        used = set(EXCLUDE) | {own_hwnd(self.root)}
         out = []
         for it in l["items"]:
+            if not it.get("checked") or it.get("kind") == "self" or it["type"] in NOTILE_TYPES:
+                continue
             h = self.opened.get(l["id"], {}).get(it["id"])
-            if it.get("checked") and it.get("kind") != "self" and h and window_alive(h):
+            if h and (h in used or not window_alive(h)
+                      or (it["type"] in ("網址", "YouTube最新") and not is_browser_window(h))):
+                h = None
+            if not h:
+                try:
+                    h = find_existing(it, used)
+                except Exception:
+                    h = None
+            if h:
+                used.add(h)
                 out.append((it["id"], it["name"], h))
+        log("全部關閉：找到 %s" % [(n, h) for _, n, h in out])
         return out
 
     def close_all(self):
@@ -2233,10 +2363,10 @@ class App:
             return
         targets = self.close_targets()
         if targets:
-            msg = "要關閉本工具開啟的 %d 個視窗：\n\n%s\n\n最後也會關閉本工具。確定嗎？" % (
+            msg = "要關閉這份清單裡打勾的 %d 個視窗：\n\n%s\n\n最後也會關閉本工具。確定嗎？" % (
                 len(targets), "\n".join("．" + n for _, n, _ in targets))
         else:
-            msg = "沒有需要關閉的視窗（只關本工具開的、清單裡打勾的）。\n\n只關閉本工具？"
+            msg = "找不到這份清單裡打勾的項目有開著的視窗。\n\n只關閉本工具？"
         if not messagebox.askyesno(APP_NAME, msg):
             return
         for _, _, h in targets:
@@ -2340,6 +2470,12 @@ class App:
         except Exception:
             pass
         self.set_status("已收起 %d 個視窗，可從桌面拖捷徑進來；再按一次還原" % len(done))
+
+    def open_log_dir(self):
+        try:
+            os.startfile(os.path.dirname(cfg_path()))
+        except Exception as ex:
+            self.set_status("打不開紀錄檔資料夾：%s" % ex)
 
     def show_settings(self):
         self.end_edit(False)

@@ -175,6 +175,7 @@ print("全部開啟並排列（螢幕2 座標）ok", app.status.cget("text"))
 pump(5)
 lid = app.cur_list()["id"]
 assert len(app.opened.get(lid, {})) == 2, app.opened   # 螢幕2清單：3 個項目有 2 個（本工具自己不算）
+w.is_browser_window = lambda h: True
 closed = []
 w.window_alive = lambda h: h not in closed
 w.close_window = lambda h: closed.append(h)
@@ -201,6 +202,7 @@ print("全部關閉 ok")
 opens = []
 w.open_item = lambda item, exclude=(), opts=None, on_cid=None, info=None: (opens.append(item["id"]) or abs(hash(item["id"])) % 100000 + 10)
 w.window_alive = lambda h: True
+w.is_browser_window = lambda h: True
 app.cur_list()["layout"] = "auto"
 urlid = [i["id"] for i in app.cur_list()["items"] if i["type"] == "網址"][0]
 app.opened[lid][urlid] = 777
@@ -216,6 +218,27 @@ for _ in range(100):
     if not app.busy: break
 assert urlid in opens
 print("重複開啟不疊加 ok")
+
+# 音樂播放器放螢幕2 右下角；找得到的視窗用找的；音樂自動判斷；紀錄檔；opened 存進設定檔
+placed2 = []
+w.place_window = lambda h, *r: placed2.append((h, r))
+app.place_music(321)
+sc = app.scale; pw, ph, pg = int(480 * sc), int(220 * sc), int(12 * sc)
+assert placed2[-1] == (321, (1920 + 1920 - pw - pg, 1040 - ph - pg, pw, ph)), placed2[-1]
+assert app.cfg["opened"] is app.opened
+app.save(); import json as _j
+assert _j.load(open(cfgf, encoding="utf-8"))["opened"]
+md = os.path.join(tmp, "歌"); os.makedirs(md)
+for i in range(4): open(os.path.join(md, "s%d.mp3" % i), "w").close()
+assert w.looks_like_music(md) and w.guess_type(md) == "音樂資料夾" and w.guess_type(fdir) == "資料夾"
+rid = [i["id"] for i in app.cur_list()["items"] if i["type"] == "網址"][0]
+app.set_item_type(rid, "音樂資料夾"); assert app.find_item(rid)["type"] == "音樂資料夾"
+app.set_item_type(rid, "網址")
+w.find_existing = lambda it, ex=(): 4242
+app.opened[lid].pop(rid, None)
+assert any(h == 4242 for _, _, h in app.close_targets())
+w.log("test"); assert os.path.exists(os.path.join(os.path.dirname(w.cfg_path()), "log.txt"))
+print("v0.5 功能 ok")
 
 # 精簡模式與設定
 for geo in ("300x200", "240x130", "500x420", "1000x660"):
