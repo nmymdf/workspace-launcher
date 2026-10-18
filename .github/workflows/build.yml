@@ -1,0 +1,55 @@
+name: build-exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝打包工具
+        run: pip install pyinstaller tkinterdnd2
+
+      - name: 執行邏輯測試
+        run: python test_logic.py
+
+      - name: 取得版本號
+        id: ver
+        shell: bash
+        run: |
+          v=$(python -c "import re;print(re.search(r'APP_VERSION = \"(.+?)\"', open('workspace_launcher.py', encoding='utf-8').read()).group(1))")
+          echo "v=$v" >> "$GITHUB_OUTPUT"
+
+      - name: 打包成 exe
+        shell: bash
+        run: |
+          pyinstaller --onefile --noconsole --collect-all tkinterdnd2 --name "WorkspaceLauncher_${{ steps.ver.outputs.v }}" workspace_launcher.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WorkspaceLauncher_${{ steps.ver.outputs.v }}
+          path: dist/*.exe
+
+      - name: 放到 exe 分支（直接下載用）
+        shell: bash
+        run: |
+          mkdir -p ../out && cp dist/*.exe ../out/
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan exe
+          git rm -rf . > /dev/null 2>&1 || true
+          cp ../out/*.exe .
+          git add -A
+          git commit -m "WorkspaceLauncher ${{ steps.ver.outputs.v }}"
+          git push -f origin exe
