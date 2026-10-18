@@ -48,7 +48,8 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@users.noreply.github.com"
           git checkout --orphan exe
-          git rm -rf . > /dev/null 2>&1 || true
+          git rm -rf --cached . > /dev/null 2>&1 || true
+          git clean -fdxq
           cp ../out/*.exe .
           git add -A
           git commit -m "WorkspaceLauncher ${{ steps.ver.outputs.v }}"
