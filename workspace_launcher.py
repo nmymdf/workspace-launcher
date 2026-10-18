@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.3"
+APP_VERSION = "v0.4"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -419,6 +419,21 @@ def restore_windows(hwnds):
             pass
 
 
+def window_alive(hwnd):
+    if not IS_WIN or not hwnd:
+        return False
+    try:
+        return bool(user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd))
+    except Exception:
+        return False
+
+
+def close_window(hwnd):
+    """用正常的「關閉視窗」方式請程式自己關（有未儲存內容的會跳出詢問，不強制結束）。"""
+    if IS_WIN:
+        user32.PostMessageW(hwnd, 0x0010, 0, 0)   # WM_CLOSE
+
+
 def own_hwnd(root):
     if not IS_WIN:
         return 0
@@ -676,7 +691,15 @@ def build_playlist(files, shuffle=True, dest=None):
     return dest
 
 
-def open_item(item, exclude=(), opts=None, on_cid=None):
+def play_file(path):
+    """先用「播放」動作（會自動開始播），這個程式不支援才退回一般開啟。"""
+    try:
+        os.startfile(path, "play")
+    except OSError:
+        os.startfile(path)
+
+
+def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
     """開啟項目並回傳它的視窗；已經開著的會直接沿用；音樂回傳 NOTILE（不排版）。"""
     if not IS_WIN:
         return None
@@ -687,7 +710,7 @@ def open_item(item, exclude=(), opts=None, on_cid=None):
         files = music_files(p, opts.get("music_sub", True))
         if not files:
             raise RuntimeError("資料夾裡沒有音樂檔")
-        os.startfile(build_playlist(files, opts.get("music_shuffle", True)))
+        play_file(build_playlist(files, opts.get("music_shuffle", True)))
         return NOTILE
     if t in ("網址", "YouTube最新"):
         url = p
@@ -698,6 +721,8 @@ def open_item(item, exclude=(), opts=None, on_cid=None):
         return open_url(url, exclude)
     ex = find_existing(it, exclude)
     if ex:
+        if info is not None:
+            info["reused"] = True     # 本來就開著，不是本工具開的
         return ex
     before = snapshot()
     os.startfile(p)
@@ -855,7 +880,7 @@ def make_palette(dark, accent=None):
 
 
 GLYPH = {"play": "", "arrange": "", "move": "", "trash": "", "gear": "",
-         "refresh": "", "desk": "", "undo": "", "back": ""}
+         "refresh": "", "desk": "", "undo": "", "power": "", "back": ""}
 LOGO_COLORS = ["#4C8DF6", "#E0B03A", "#3FB68B", "#8A93A6"]
 
 
@@ -1148,6 +1173,7 @@ class App:
         self.build_ui()
         self.refresh_all()
         self.hidden_wins = []
+        self.opened = {}      # {清單id: {項目id: hwnd}}：本工具自己開出來的視窗
         self.lay = None
         root.bind("<Configure>", self.on_root_conf, add="+")
         self.apply_layout()
@@ -1317,7 +1343,7 @@ class App:
         self.btn_run = FlatButton(self.tb, self, text="全部開啟並排列", glyph="play", tip="全部開啟並排列",
                                   command=self.run_all, primary=True)
         self.btn_run.pack(side="right", padx=(3, 12), pady=8)
-        for glyph, tip, cmd in (("gear", "設定", self.show_settings), ("arrange", "整理現有視窗", self.arrange_now),
+        for glyph, tip, cmd in (("power", "全部關閉", self.close_all), ("gear", "設定", self.show_settings), ("arrange", "整理現有視窗", self.arrange_now),
                                 ("desk", "顯示桌面", self.toggle_desk)):
             b = FlatButton(self.tb, self, glyph=glyph, tip=tip, command=cmd)
             b.pack(side="right", padx=3, pady=8)
@@ -2113,7 +2139,8 @@ class App:
             for it in items:
                 q.put(("status", "開啟：%s…" % it["name"]))
                 try:
-                    h = open_item(it, used, opts, lambda cid, i=it: q.put(("cid", i["id"], cid)))
+                    info = {}
+                    h = open_item(it, used, opts, lambda cid, i=it: q.put(("cid", i["id"], cid)), info)
                 except Exception as ex:
                     failed.append("%s（%s）" % (it["name"], ex))
                     continue
@@ -2122,6 +2149,8 @@ class App:
                 if h:
                     used.add(h)
                     q.put(("placed", it["id"], h))
+                    if not info.get("reused"):
+                        q.put(("opened", it["id"], h))
                 else:
                     pending.append(it)
             t0 = time.time()
@@ -2134,6 +2163,7 @@ class App:
                         used.add(h)
                         pending.remove(it)
                         q.put(("placed", it["id"], h))
+                        q.put(("opened", it["id"], h))
             q.put(("done", [p["name"] for p in pending], failed))
 
         def poll():
@@ -2144,6 +2174,8 @@ class App:
                         self.set_status(msg[1])
                     elif msg[0] == "placed":
                         self.place_one(l, msg[1], msg[2])
+                    elif msg[0] == "opened":
+                        self.opened.setdefault(l["id"], {})[msg[1]] = msg[2]
                     elif msg[0] == "cid":
                         for i in l["items"]:
                             if i["id"] == msg[1]:
@@ -2167,6 +2199,40 @@ class App:
         if failed:
             msg += "；開啟失敗：" + "、".join(failed)
         self.set_status(msg)
+
+    def close_targets(self):
+        """這份清單裡打勾、而且是本工具開出來、現在還開著的視窗。"""
+        l = self.cur_list()
+        out = []
+        for it in l["items"]:
+            h = self.opened.get(l["id"], {}).get(it["id"])
+            if it.get("checked") and it.get("kind") != "self" and h and window_alive(h):
+                out.append((it["id"], it["name"], h))
+        return out
+
+    def close_all(self):
+        if self.busy:
+            self.set_status("正在開啟中，請稍後再關")
+            return
+        targets = self.close_targets()
+        if targets:
+            msg = "要關閉本工具開啟的 %d 個視窗：\n\n%s\n\n最後也會關閉本工具。確定嗎？" % (
+                len(targets), "\n".join("．" + n for _, n, _ in targets))
+        else:
+            msg = "沒有需要關閉的視窗（只關本工具開的、清單裡打勾的）。\n\n只關閉本工具？"
+        if not messagebox.askyesno(APP_NAME, msg):
+            return
+        for _, _, h in targets:
+            close_window(h)
+        self.set_status("關閉中…")
+        self.root.after(2500, lambda: self.after_close(targets))
+
+    def after_close(self, targets):
+        left = [n for _, n, h in targets if window_alive(h)]
+        if left:
+            self.set_status("這幾個沒關掉（可能在問要不要存檔）：%s；處理完再按一次" % "、".join(left))
+            return
+        self.on_close()
 
     def arrange_now(self):
         l = self.cur_list()

@@ -158,7 +158,7 @@ print("雙螢幕預覽 ok")
 
 # 執行：換成假的開啟／排版函式，檢查排到螢幕2 的座標
 placed = {}
-w.open_item = lambda item, exclude=(), opts=None, on_cid=None: abs(hash(item["id"])) % 100000 + 10
+w.open_item = lambda item, exclude=(), opts=None, on_cid=None, info=None: abs(hash(item["id"])) % 100000 + 10
 w.place_window = lambda h, x, y, wd, ht: placed.__setitem__(h, (x, y, wd, ht))
 w.own_hwnd = lambda r: 1
 app.cur_list()["screen"] = 2; app.cur_list()["layout"] = "auto"; app.refresh_all(); pump()
@@ -170,6 +170,32 @@ assert not app.busy and len(placed) == 3, placed
 assert placed[1] == (1920, 0, 1152, 1040), placed[1]
 assert all(v[0] >= 1920 for v in placed.values())
 print("全部開啟並排列（螢幕2 座標）ok", app.status.cget("text"))
+
+# 全部關閉：只關本工具開的、打勾的；關完最後關自己
+pump(5)
+lid = app.cur_list()["id"]
+assert len(app.opened.get(lid, {})) == 2, app.opened   # 螢幕2清單：3 個項目有 2 個（本工具自己不算）
+closed = []
+w.window_alive = lambda h: h not in closed
+w.close_window = lambda h: closed.append(h)
+quit_ = []
+app.on_close = lambda: quit_.append(1)
+mb.askyesno = lambda *a, **k: (asked.append(a) or True)
+tg = app.close_targets(); assert len(tg) == 2
+first = tg[0][0]; app.find_item(first)["checked"] = False
+assert len(app.close_targets()) == 1          # 沒打勾的不關
+app.find_item(first)["checked"] = True
+app.close_all(); pump(); time.sleep(2.7); pump(10)
+assert len(closed) == 2 and quit_ == [1], (closed, quit_)
+asked_text = asked[-1][1]
+assert "確定嗎" in asked_text
+# 有視窗關不掉 → 不關本工具
+closed.clear(); quit_.clear()
+w.window_alive = lambda h: True
+app.close_all(); pump(); time.sleep(2.7); pump(10)
+assert quit_ == [] and "沒關掉" in app.status.cget("text")
+w.window_alive = lambda h: h not in closed
+print("全部關閉 ok")
 
 # 精簡模式與設定
 for geo in ("300x200", "240x130", "500x420", "1000x660"):
