@@ -34,7 +34,7 @@ print("初始列 ok")
 type_into(w.NEW, "path", fdir)
 items = app.cur_list()["items"]
 assert len(items) == 2 and items[1]["type"] == "資料夾" and items[1]["name"] == "專案", items
-assert app.draft["path"] == "" and app.edit and app.edit["iid"] == w.NEW and app.edit["col"] == "type", app.edit
+assert app.draft["path"] == "" and app.edit and app.edit["iid"] == w.NEW and app.edit["col"] == "name", app.edit
 app.end_edit(False)
 print("空白列自動存檔 ok")
 
@@ -58,14 +58,14 @@ print("網址／拖入檔案 ok")
 # Tab 導覽：改第二列名稱後往右到「路徑」
 fid = app.cur_list()["items"][1]["id"]
 type_into(fid, "name", "專案資料", move=1)
-assert app.edit and app.edit["iid"] == fid and app.edit["col"] == "path", app.edit
+assert app.edit and app.edit["iid"] == fid and app.edit["col"] == "type", app.edit
 app.end_edit(False)
 assert app.find_item(fid)["name"] == "專案資料"
 print("Enter/Tab 跳下一格 ok")
 
 # 下拉：滾輪與↑↓不能改值；↓才打開
-app.begin_edit(fid, "screen"); pump()
-cb = app.edit["w"]; cb.set("跟隨清單")
+app.begin_edit(fid, "type"); pump()
+cb = app.edit["w"]; cb.set("資料夾")
 cb.focus_force(); pump()
 for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<Up>"):
     try:
@@ -73,7 +73,7 @@ for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<Up>"):
     except tk.TclError:
         pass
     pump()
-assert cb.get() == "跟隨清單", cb.get()
+assert cb.get() == "資料夾", cb.get()
 app.end_edit(False)
 print("滾輪／↑ 不改值 ok")
 
@@ -137,16 +137,23 @@ app.restore_auto()
 assert app.cur_list()["layout"] == "auto" and w.get_rects(app.cur_list(), 1)["self"] == (0, 0, 0.6, 1.0)
 print("預覽拖邊界／換格子／還原 ok")
 
+# 新類型與音樂不排版
+m = w.new_list("音樂測試"); m["items"].append({"id": "mu", "kind": "item", "type": "音樂資料夾", "name": "音樂", "path": fdir, "screen": 0, "checked": True})
+assert w.group_ids(m, 1) == ["self"] and "mu" not in w.get_rects(m, 1)
+assert w.validate("YouTube最新", "https://www.youtube.com/@NBCNews") == ""
+print("新類型 ok")
+
 # 例外螢幕 → 兩個預覽
 it = app.cur_list()["items"][1]; it["screen"] = 2; app.save(); app.refresh_preview(); pump()
 pvs = [c for b in app.pv_holder.winfo_children() for c in b.winfo_children() if isinstance(c, w.Preview)]
 assert [p.screen for p in pvs] == [1, 2]
+app.refresh_items(); assert "· 螢幕2" in app.tree.set(it["id"], "name")
 it["screen"] = 0; app.refresh_preview()
 print("雙螢幕預覽 ok")
 
 # 執行：換成假的開啟／排版函式，檢查排到螢幕2 的座標
 placed = {}
-w.open_item = lambda item: abs(hash(item["id"])) % 100000 + 10
+w.open_item = lambda item, exclude=(), opts=None, on_cid=None: abs(hash(item["id"])) % 100000 + 10
 w.place_window = lambda h, x, y, wd, ht: placed.__setitem__(h, (x, y, wd, ht))
 w.own_hwnd = lambda r: 1
 app.cur_list()["screen"] = 2; app.cur_list()["layout"] = "auto"; app.refresh_all(); pump()

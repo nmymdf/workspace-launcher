@@ -67,3 +67,30 @@ d = tempfile.mkdtemp(); f = os.path.join(d, "c.json")
 c = w.load_config(f); w.save_config(c, f); c2 = w.load_config(f)
 assert c2["lists"][0]["items"][0]["id"] == "self" and c2["autostart"] is False
 print("config ok")
+
+# ---- v0.2 ----
+assert w.clean_keyword("LINE - 捷徑") == "LINE" and w.clean_keyword("記事本.lnk") == "記事本"
+assert w.item_keys({"name": "LINE - 捷徑", "path": r"C:\\x\\LINE.lnk"}) == ["LINE"]
+assert w.title_score("LINE", "LINE") == 3 and w.title_score("LINE - 聊天", "LINE") == 2
+assert w.title_score("Chrome", "LINE") == 0 and w.title_score("Timeline notes", "LINE") == 0
+feed = """<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+<entry><yt:videoId>AAA111</yt:videoId><title>新的</title></entry>
+<entry><yt:videoId>BBB222</yt:videoId><title>舊的</title></entry></feed>"""
+v = w.parse_feed(feed)
+assert [x["id"] for x in v] == ["AAA111", "BBB222"]
+cid = "UC" + "a" * 22
+assert w.channel_id_from_html('x "externalId":"%s" y' % cid) == cid
+assert w.resolve_channel_id("https://www.youtube.com/channel/" + cid) == cid
+w.http_get = lambda url, timeout=12: feed
+url, c = w.latest_video_url({"path": "https://www.youtube.com/channel/" + cid})
+assert url.endswith("AAA111") and c == cid
+d = tempfile.mkdtemp(); os.makedirs(os.path.join(d, "sub"))
+for p in ("a.mp3", os.path.join("sub", "b.flac"), "c.txt"):
+    open(os.path.join(d, p), "w").close()
+assert len(w.music_files(d, True)) == 2 and len(w.music_files(d, False)) == 1
+m3u = w.build_playlist(w.music_files(d), True, os.path.join(d, "x.m3u"))
+assert open(m3u, encoding="utf-8-sig").read().count("\n") == 3
+lst = {"screen": 1, "items": [{"id": "a", "checked": True, "type": "App", "screen": 0},
+                              {"id": "m", "checked": True, "type": "音樂資料夾", "screen": 0}]}
+assert w.group_ids(lst, 1) == ["a"] and w.screens_in_use(lst) == [1]
+print("v0.2 邏輯 ok")

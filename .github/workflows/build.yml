@@ -34,7 +34,7 @@ jobs:
       - name: 打包成 exe
         shell: bash
         run: |
-          pyinstaller --onefile --noconsole --collect-all tkinterdnd2 --name "WorkspaceLauncher_${{ steps.ver.outputs.v }}" workspace_launcher.py
+          pyinstaller --onefile --noconsole --collect-all tkinterdnd2 --icon app.ico --add-data "app.ico;." --name "WorkspaceLauncher_${{ steps.ver.outputs.v }}" workspace_launcher.py
 
       - uses: actions/upload-artifact@v4
         with:
