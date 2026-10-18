@@ -197,6 +197,26 @@ assert quit_ == [] and "沒關掉" in app.status.cget("text")
 w.window_alive = lambda h: h not in closed
 print("全部關閉 ok")
 
+# 再按一次全部開啟：網址視窗還開著就不再開
+opens = []
+w.open_item = lambda item, exclude=(), opts=None, on_cid=None, info=None: (opens.append(item["id"]) or abs(hash(item["id"])) % 100000 + 10)
+w.window_alive = lambda h: True
+app.cur_list()["layout"] = "auto"
+urlid = [i["id"] for i in app.cur_list()["items"] if i["type"] == "網址"][0]
+app.opened[lid][urlid] = 777
+app.run_all()
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+assert urlid not in opens and opens, opens
+w.window_alive = lambda h: False          # 被關掉了 → 會重開
+opens.clear(); app.run_all()
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+assert urlid in opens
+print("重複開啟不疊加 ok")
+
 # 精簡模式與設定
 for geo in ("300x200", "240x130", "500x420", "1000x660"):
     root.geometry(geo); pump(8)

@@ -710,7 +710,10 @@ def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
         files = music_files(p, opts.get("music_sub", True))
         if not files:
             raise RuntimeError("資料夾裡沒有音樂檔")
+        before = snapshot()
         play_file(build_playlist(files, opts.get("music_shuffle", True)))
+        if info is not None:     # 記下播放器視窗，下次還開著就不重播
+            info["music"] = wait_new(before, 6, settle=0.5, exclude=exclude)
         return NOTILE
     if t in ("網址", "YouTube最新"):
         url = p
@@ -1174,6 +1177,7 @@ class App:
         self.refresh_all()
         self.hidden_wins = []
         self.opened = {}      # {清單id: {項目id: hwnd}}：本工具自己開出來的視窗
+        self.music_win = {}   # {清單id: {項目id: hwnd}}：音樂播放器視窗（不會被「全部關閉」關掉）
         self.lay = None
         root.bind("<Configure>", self.on_root_conf, add="+")
         self.apply_layout()
@@ -2131,6 +2135,8 @@ class App:
             self.place_one(l, SELF_ID, own_hwnd(self.root))
         opts = self.music_opts()
         used0 = set(EXCLUDE)
+        known = dict(self.opened.get(l["id"], {}))
+        known_music = dict(self.music_win.get(l["id"], {}))
         q = queue.Queue()
 
         def work():
@@ -2138,6 +2144,13 @@ class App:
             pending, failed = [], []
             for it in items:
                 q.put(("status", "開啟：%s…" % it["name"]))
+                h0 = known.get(it["id"])
+                if it["type"] in ("網址", "YouTube最新") and h0 and h0 not in used and window_alive(h0):
+                    used.add(h0)                    # 上次開的瀏覽器視窗還在，只重新排版，不再開新的
+                    q.put(("placed", it["id"], h0))
+                    continue
+                if it["type"] in NOTILE_TYPES and window_alive(known_music.get(it["id"])):
+                    continue                        # 音樂播放器還開著，不重播
                 try:
                     info = {}
                     h = open_item(it, used, opts, lambda cid, i=it: q.put(("cid", i["id"], cid)), info)
@@ -2145,6 +2158,8 @@ class App:
                     failed.append("%s（%s）" % (it["name"], ex))
                     continue
                 if h == NOTILE:
+                    if info.get("music"):
+                        q.put(("music", it["id"], info["music"]))
                     continue
                 if h:
                     used.add(h)
@@ -2174,6 +2189,8 @@ class App:
                         self.set_status(msg[1])
                     elif msg[0] == "placed":
                         self.place_one(l, msg[1], msg[2])
+                    elif msg[0] == "music":
+                        self.music_win.setdefault(l["id"], {})[msg[1]] = msg[2]
                     elif msg[0] == "opened":
                         self.opened.setdefault(l["id"], {})[msg[1]] = msg[2]
                     elif msg[0] == "cid":
