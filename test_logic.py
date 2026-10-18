@@ -93,4 +93,4 @@ assert open(m3u, encoding="utf-8-sig").read().count("\n") == 3
 lst = {"screen": 1, "items": [{"id": "a", "checked": True, "type": "App", "screen": 0},
                               {"id": "m", "checked": True, "type": "音樂資料夾", "screen": 0}]}
 assert w.group_ids(lst, 1) == ["a"] and w.screens_in_use(lst) == [1]
-print("v0.2 邏輯 ok")
+print("v0.2 logic ok")
