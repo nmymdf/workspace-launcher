@@ -276,6 +276,7 @@ app.draft = {"type": "", "name": "", "path": "", "screen": 0}
 app.commit_value(w.NEW, "name", "只有名稱"); assert "還沒填路徑" in app.status_text
 app.draft = {"type": "", "name": "", "path": "", "screen": 0}; app.refresh_items()
 assert w.vlc_command("V", "p.m3u8", True) == ["V", "--random", "--loop", "p.m3u8"]
+assert w.vlc_command("V", ["C:\\a", "D:\\b"], False) == ["V", "--loop", "C:\\a", "D:\\b"]
 assert w.vlc_command("V", "p.m3u8", False) == ["V", "--loop", "p.m3u8"]
 assert w.find_vlc("/no/such") == ""
 fake = os.path.join(tmp, "vlc.exe"); open(fake, "w").close()
@@ -284,6 +285,34 @@ pl8 = w.build_playlist(["a.mp3", "b.mp3"], False, os.path.join(tmp, "x.m3u8"), b
 assert not open(pl8, "rb").read().startswith(b"\xef\xbb\xbf")
 pl3 = w.build_playlist(["a.mp3"], False, os.path.join(tmp, "y.m3u"))
 assert open(pl3, "rb").read().startswith(b"\xef\xbb\xbf")
+
+# v0.8.2：所有打勾的音樂資料夾合併成一次交給 VLC
+nl = w.new_list("兩個音樂"); app.cfg["lists"].append(nl); app.cfg["current"] = nl["id"]
+for i, pth in enumerate((fdir, md)):
+    nl["items"].append({"id": "mu%d" % i, "kind": "item", "type": "音樂資料夾", "name": "音樂%d" % i, "path": pth,
+                        "screen": 0, "checked": True})
+app.refresh_all(); pump()
+calls_m = []
+def fake_music(items, exclude=(), opts=None, info=None):
+    calls_m.append([i["id"] for i in items]); info["music"] = 555
+w.open_music = fake_music
+placed3 = []
+w.place_window = lambda h, *r: placed3.append((h, r))
+w.window_alive = lambda h: False
+app.run_all()
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+pump()
+assert calls_m == [["mu0", "mu1"]], calls_m
+assert app.music_win[nl["id"]] == {"mu0": 555, "mu1": 555}
+assert placed3 and placed3[-1][0] == 555
+w.window_alive = lambda h: h == 555          # 播放器還開著 → 不再呼叫 open_music
+calls_m.clear(); app.run_all()
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+assert calls_m == []
 print("v0.7 ok")
 
 # 精簡模式與設定

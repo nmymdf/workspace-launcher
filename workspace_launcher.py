@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.8.1"
+APP_VERSION = "v0.8.2"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -742,12 +742,14 @@ def find_vlc(path=""):
     return ""
 
 
-def vlc_command(vlc, playlist, shuffle=True):
-    """VLC 的指令列：隨機（可選）、整份清單循環，開了就自動播放。"""
+def vlc_command(vlc, targets, shuffle=True):
+    """VLC 的指令列：隨機（可選）、循環；targets 可以是一個或多個資料夾／清單檔，開了就自動播放。"""
+    if isinstance(targets, str):
+        targets = [targets]
     args = [vlc]
     if shuffle:
         args.append("--random")
-    args += ["--loop", playlist]
+    args += ["--loop"] + list(targets)
     return args
 
 
@@ -770,6 +772,49 @@ def play_file(path):
         os.startfile(path)
 
 
+def open_music(items, exclude=(), opts=None, info=None):
+    """把所有音樂資料夾一次交給 VLC（合併成同一份播放，連續播放）；沒有 VLC 就用預設播放器開一首。"""
+    if not IS_WIN:
+        return None
+    opts = opts or {}
+    folders = []
+    for it in items:
+        t, p = fix_shortcut(it.get("type"), os.path.expandvars(it.get("path", "")))
+        p = os.path.normpath(p)
+        if not os.path.isdir(p):
+            raise RuntimeError("找不到音樂資料夾：%s" % p)
+        folders.append(p)
+    sub, shuffle = opts.get("music_sub", True), opts.get("music_shuffle", True)
+    files = []
+    for f in folders:
+        files += [os.path.normpath(x) for x in music_files(f, sub)]
+    if not files:
+        raise RuntimeError("資料夾裡沒有音樂檔")
+    vlc = find_vlc(opts.get("vlc_path", "")) if opts.get("music_vlc", True) else ""
+    if vlc:
+        if sub:
+            targets = folders      # 直接給資料夾，VLC 會自己加入裡面的音樂並開始播放
+        else:                      # 不含子資料夾時只能用清單檔（不帶 BOM，路徑一律反斜線）
+            targets = [build_playlist(files, False, os.path.join(tempfile.gettempdir(), "WorkspaceLauncher",
+                                                                 "music.m3u8"), bom=False)]
+        cmd = vlc_command(vlc, targets, shuffle)
+        log("音樂（VLC）：%d 個資料夾，共 %d 首，%s" % (len(folders), len(files), cmd))
+        subprocess.Popen(cmd)
+    else:
+        one = random.choice(files) if shuffle else files[0]
+        log("音樂（預設播放器）：共 %d 首，開啟 %s" % (len(files), one))
+        os.startfile(one)
+    if info is not None:   # 記下播放器視窗：之後放到螢幕2右下角、再按不重播
+        t0, h = time.time(), None
+        while time.time() - t0 < 10 and not h:
+            h = find_player(exclude)
+            if not h:
+                time.sleep(0.4)
+        info["music"] = h
+        log("音樂：播放器視窗 %s" % h)
+    return h
+
+
 def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
     """開啟項目並回傳它的視窗；已經開著的會直接沿用；音樂回傳 NOTILE（不排版）。"""
     if not IS_WIN:
@@ -778,36 +823,7 @@ def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
     t, p = fix_shortcut(item.get("type"), os.path.expandvars(item.get("path", "")))
     it = dict(item, type=t, path=p)
     if t == "音樂資料夾":
-        files = music_files(p, opts.get("music_sub", True))
-        if not files:
-            raise RuntimeError("資料夾裡沒有音樂檔")
-        vlc = find_vlc(opts.get("vlc_path", "")) if opts.get("music_vlc", True) else ""
-        if vlc:
-            # VLC 讀檔沒有媒體播放器那種權限限制，可以連續播放整個資料夾
-            ok = [f for f in files if os.access(f, os.R_OK)]
-            if info is not None and len(ok) < len(files):
-                info["skipped"] = len(files) - len(ok)     # 讀不到的檔案略過
-            if not ok:
-                raise RuntimeError("音樂檔都讀不到（沒有權限？）")
-            # VLC 的清單不能有 BOM：BOM 會被當成第一個檔名而跳出錯誤
-            pl = build_playlist(ok, False, os.path.join(tempfile.gettempdir(), "WorkspaceLauncher", "music.m3u8"), bom=False)
-            cmd = vlc_command(vlc, pl, opts.get("music_shuffle", True))
-            log("音樂（VLC）：%s 找到 %d 首，%s" % (p, len(files), cmd))
-            subprocess.Popen(cmd)
-        else:
-            # 沒有 VLC：直接開一首，等於你在檔案總管點兩下（用「開啟」動作，不是「播放」）
-            one = random.choice(files) if opts.get("music_shuffle", True) else files[0]
-            log("音樂（預設播放器）：%s 找到 %d 首，開啟 %s" % (p, len(files), one))
-            os.startfile(one)
-        if info is not None:     # 記下播放器視窗：之後放到螢幕2右下角、再按不重播
-            t0, h = time.time(), None
-            while time.time() - t0 < 10 and not h:
-                h = find_player(exclude)
-                if not h:
-                    time.sleep(0.4)
-            info["music"] = h
-            log("音樂：播放器視窗 %s" % h)
-        return NOTILE
+        return NOTILE        # 音樂由 open_music 一次處理（所有打勾的音樂資料夾合併成一次播放）
     if t in ("網址", "YouTube最新"):
         url = p
         if t == "YouTube最新":
@@ -2332,7 +2348,7 @@ class App:
 
         def work():
             used = set(used0)
-            pending, failed = [], []
+            pending, failed, music_items = [], [], []
             for it in items:
                 q.put(("status", "開啟：%s…" % it["name"]))
                 h0 = known.get(it["id"])
@@ -2341,9 +2357,8 @@ class App:
                     used.add(h0)                    # 上次開的瀏覽器視窗還在，只重新排版，不再開新的
                     q.put(("placed", it["id"], h0))
                     continue
-                if it["type"] in NOTILE_TYPES and window_alive(known_music.get(it["id"])):
-                    q.put(("music", it["id"], known_music[it["id"]]))   # 播放器還開著：不重播，只放回角落
-                    log("音樂：播放器還開著，不重播")
+                if it["type"] in NOTILE_TYPES:
+                    music_items.append(it)          # 音樂最後一起處理
                     continue
                 try:
                     info = {}
@@ -2354,11 +2369,7 @@ class App:
                     continue
                 log("開啟：%s [%s] %s -> 視窗 %s%s" % (it["name"], it["type"], it["path"], h,
                                                   "（本來就開著）" if info.get("reused") else ""))
-                if info.get("skipped"):
-                    q.put(("note", "「%s」有 %d 首讀不到，已略過" % (it["name"], info["skipped"])))
                 if h == NOTILE:
-                    if info.get("music"):
-                        q.put(("music", it["id"], info["music"]))
                     continue
                 if h:
                     used.add(h)
@@ -2367,6 +2378,23 @@ class App:
                         q.put(("opened", it["id"], h))
                 else:
                     pending.append(it)
+            if music_items:
+                ids = [m["id"] for m in music_items]
+                alive = [known_music[i] for i in ids if window_alive(known_music.get(i))]
+                if alive:                           # 播放器還開著：不重播，只放回角落
+                    log("音樂：播放器還開著，不重播")
+                    q.put(("music", ids, alive[0]))
+                else:
+                    q.put(("status", "開啟音樂…"))
+                    minfo = {}
+                    try:
+                        open_music(music_items, used, opts, minfo)
+                    except Exception as ex:
+                        failed.append("音樂（%s）" % ex)
+                        log("失敗：音樂 -> %s" % ex)
+                    else:
+                        if minfo.get("music"):
+                            q.put(("music", ids, minfo["music"]))
             t0 = time.time()
             while pending and time.time() - t0 < 60:
                 q.put(("status", "等待視窗出現：%s…" % "、".join(p["name"] for p in pending)))
@@ -2391,7 +2419,8 @@ class App:
                     elif msg[0] == "note":
                         self.run_notes.append(msg[1])
                     elif msg[0] == "music":
-                        self.music_win.setdefault(l["id"], {})[msg[1]] = msg[2]
+                        for mid in msg[1]:
+                            self.music_win.setdefault(l["id"], {})[mid] = msg[2]
                         self.place_music(msg[2])
                     elif msg[0] == "opened":
                         self.opened.setdefault(l["id"], {})[msg[1]] = msg[2]
