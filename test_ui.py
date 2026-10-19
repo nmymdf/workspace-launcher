@@ -240,6 +240,30 @@ assert any(h == 4242 for _, _, h in app.close_targets())
 w.log("test"); assert os.path.exists(os.path.join(os.path.dirname(w.cfg_path()), "log.txt"))
 print("v0.5 功能 ok")
 
+# v0.6：只開啟單一項目（不管有沒有打勾），放滿整個螢幕，其他項目不動
+w.find_existing = lambda it, ex=(): None
+single = [i for i in app.cur_list()["items"] if i["type"] == "網址"][0]
+single["checked"] = False
+w.window_alive = lambda h: False
+opens.clear(); placed2.clear()
+app.run_all(only=single["id"])
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+assert opens == [single["id"]], opens
+assert placed2 and placed2[0][1] == (1920, 0, 1920, 1040), placed2   # 清單開在螢幕2 → 螢幕2 全螢幕
+assert "只" not in app.status.cget("text") and single["name"] in app.status.cget("text")
+# ▶ 欄與 self 列
+assert app.tree.set(single["id"], "go") == "►" and app.tree.set("self", "go") == ""
+bb = app.tree.bbox(single["id"], "go")
+opens.clear()
+app.tree.event_generate("<ButtonPress-1>", x=bb[0] + 5, y=bb[1] + 5); pump()
+for _ in range(100):
+    pump(); time.sleep(0.05)
+    if not app.busy: break
+assert opens == [single["id"]], opens
+print("v0.6 單獨開啟 ok")
+
 # 精簡模式與設定
 for geo in ("300x200", "240x130", "500x420", "1000x660"):
     root.geometry(geo); pump(8)

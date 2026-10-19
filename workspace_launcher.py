@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.5"
+APP_VERSION = "v0.6"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -1215,7 +1215,7 @@ class Preview(tk.Canvas):
 # 主程式
 # ----------------------------------------------------------------------------
 
-COLS = ("grip", "chk", "name", "type", "path")
+COLS = ("grip", "chk", "name", "type", "path", "go")
 EDITABLE = ["name", "type", "path"]
 
 
@@ -1245,6 +1245,7 @@ class App:
         self.setup_style()
         self.build_ui()
         self.refresh_all()
+        self.single = None
         self.hidden_wins = []
         self.opened = self.cfg.setdefault("opened", {})   # {清單id: {項目id: hwnd}}，存在設定檔，重開工具還記得
         self.music_win = {}   # {清單id: {項目id: hwnd}}：音樂播放器視窗（不會被「全部關閉」關掉）
@@ -1492,7 +1493,8 @@ class App:
         self.tree = ttk.Treeview(tf, columns=COLS, show="headings", selectmode="browse")
         for c, t, w, a, stretch in [("grip", "", 26, "center", False), ("chk", "執行", 38, "center", False),
                                     ("name", "名稱", 130, "w", True), ("type", "類型", 104, "w", False),
-                                    ("path", "路徑／網址", 190, "w", True)]:
+                                    ("path", "路徑／網址", 190, "w", True),
+                                    ("go", "", 34, "center", False)]:
             self.tree.heading(c, text=t, anchor="w")
             self.tree.column(c, width=int(w * sc), anchor=a, stretch=stretch)
         sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
@@ -1577,9 +1579,9 @@ class App:
 
     def row_values(self, it):
         if it.get("kind") == "self":
-            return ("•", "☑" if it.get("checked") else "☐", it["name"], "App", "（固定第一列，不能刪除）")
+            return ("•", "☑" if it.get("checked") else "☐", it["name"], "App", "（固定第一列，不能刪除）", "")
         tag = "  · 螢幕%d" % it["screen"] if it.get("screen") else ""
-        return ("⋮⋮", "☑" if it.get("checked") else "☐", it["name"] + tag, it["type"], it["path"])
+        return ("⋮⋮", "☑" if it.get("checked") else "☐", it["name"] + tag, it["type"], it["path"], "►")
 
     def item_tags(self, it):
         if it.get("kind") == "self":
@@ -1598,7 +1600,7 @@ class App:
     def blank_values(self):
         d = self.draft
         path = d["path"] or ("" if d["name"] else "空白輸入列：輸入或把檔案、資料夾拖進來，填完自動存")
-        return ("", "", d["name"], d["type"], path)
+        return ("", "", d["name"], d["type"], path, "")
 
     def refresh_row(self, iid):
         it = self.find_item(iid)
@@ -1663,6 +1665,10 @@ class App:
                 return "break"
             self.select_item(row)
             it = self.find_item(row)
+            if col == "go":
+                if it.get("kind") != "self":
+                    self.run_all(only=row)
+                return "break"
             if col == "chk":
                 it["checked"] = not it.get("checked")
                 if it["type"] in NOTILE_TYPES:
@@ -1712,6 +1718,10 @@ class App:
         if not row or row == NEW:
             return
         col = self.col_name("items", t.identify_column(e.x))
+        if col == "go":
+            if row != SELF_ID:
+                self.tip.schedule(e.x_root, e.y_root, "只開啟此項")
+            return
         if col not in ("name", "path"):
             return
         text = str(t.set(row, col))
@@ -1730,6 +1740,8 @@ class App:
             return
         self.select_item(row)
         m = self.menu()
+        m.add_command(label="只開啟此項", command=lambda: self.run_all(only=row))
+        m.add_separator()
         var = tk.IntVar(value=it.get("screen", 0))
         for v, label in ((0, "此項開在：跟隨清單"), (1, "此項開在：螢幕1"), (2, "此項開在：螢幕2")):
             m.add_radiobutton(label=label, variable=var, value=v, command=lambda v=v: self.set_item_screen(row, v))
@@ -2188,12 +2200,12 @@ class App:
     def music_opts(self):
         return {"music_shuffle": self.cfg.get("music_shuffle", True), "music_sub": self.cfg.get("music_sub", True)}
 
-    def place_one(self, lst, iid, hwnd):
+    def place_one(self, lst, iid, hwnd, full=False):
         it = next((i for i in lst["items"] if i["id"] == iid), None)
         if not it or not hwnd:
             return
         s = effective_screen(lst, it)
-        r = get_rects(lst, s).get(iid)
+        r = (0.0, 0.0, 1.0, 1.0) if full else get_rects(lst, s).get(iid)
         if not r:
             return
         m = monitor_for(s)
@@ -2232,16 +2244,25 @@ class App:
                 return
             self.root.after(450, lambda: self.verify_place(hwnd, target, tries - 1))
 
-    def run_all(self):
+    def run_all(self, only=None):
+        """全部開啟並排列；only=項目id 時只開那一項（不管有沒有打勾，放滿整個螢幕）。"""
         if self.busy:
             return
         l = self.cur_list()
-        items = [dict(i) for i in l["items"] if i.get("checked") and i.get("kind") != "self"]
+        if only:
+            items = [dict(i) for i in l["items"] if i["id"] == only and i.get("kind") != "self"]
+            if not items:
+                return
+            self.single = items[0]["name"]
+        else:
+            items = [dict(i) for i in l["items"] if i.get("checked") and i.get("kind") != "self"]
+            self.single = None
         self.busy = True
         self.set_status("開啟中…")
         me = next((i for i in l["items"] if i["id"] == SELF_ID), None)
-        if me and me.get("checked"):
+        if not only and me and me.get("checked"):
             self.place_one(l, SELF_ID, own_hwnd(self.root))
+        log("開始%s：%s" % ("單獨開啟" if only else "全部開啟", [i["name"] for i in items]))
         opts = self.music_opts()
         used0 = set(EXCLUDE)
         known = dict(self.opened.get(l["id"], {}))
@@ -2303,7 +2324,7 @@ class App:
                     if msg[0] == "status":
                         self.set_status(msg[1])
                     elif msg[0] == "placed":
-                        self.place_one(l, msg[1], msg[2])
+                        self.place_one(l, msg[1], msg[2], full=bool(only))
                     elif msg[0] == "music":
                         self.music_win.setdefault(l["id"], {})[msg[1]] = msg[2]
                         self.place_music(msg[2])
@@ -2327,7 +2348,7 @@ class App:
 
     def finish_run(self, pending, failed):
         self.busy = False
-        msg = "完成：已開啟並排列"
+        msg = "完成：已開啟「%s」" % self.single if self.single else "完成：已開啟並排列"
         if pending:
             msg += "；等了一分鐘還沒看到視窗：" + "、".join(pending)
         if failed:
@@ -2442,7 +2463,7 @@ class App:
         if ttl_on:
             self.logo_c.pack(side="left", padx=(12, 8), pady=8, before=self.btn_run)
             self.ttl.pack(side="left", before=self.btn_run)
-        cols = ["grip", "chk", "name"] + (["type"] if type_on else []) + (["path"] if path_on and type_on else [])
+        cols = ["grip", "chk", "name"] + (["type"] if type_on else []) + (["path"] if path_on and type_on else []) + ["go"]
         self.tree.configure(displaycolumns=cols)
         if run_txt:
             self.btn_run.relook(text="全部開啟並排列")
