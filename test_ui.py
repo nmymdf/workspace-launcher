@@ -265,14 +265,21 @@ assert opens == [single["id"]], opens
 print("v0.6 單獨開啟 ok")
 
 # v0.7：存檔提示、逐首開啟選項、單一執行
-assert app.cfg["music_one"] is False and app.music_opts()["music_one"] is False
-app.var_one.set(True); app.on_music_opts()
-assert app.cfg["music_one"] is True and app.music_opts()["music_one"] is True
+assert app.cfg["music_vlc"] is True and app.music_opts()["music_vlc"] is True
+app.var_vlc.set(False); app.ent_vlc.delete(0, "end"); app.ent_vlc.insert(0, '"D:\\x\\vlc.exe"'); app.on_music_opts()
+assert app.cfg["music_vlc"] is False and app.cfg["vlc_path"] == "D:\\x\\vlc.exe"
+app.var_vlc.set(True); app.ent_vlc.delete(0, "end"); app.on_music_opts()
+assert app.cfg["vlc_path"] == w.DEFAULT_VLC
 assert app.saved_lbl.cget("text").startswith("已儲存 ")
 assert w.ensure_single_instance() is True
 app.draft = {"type": "", "name": "", "path": "", "screen": 0}
 app.commit_value(w.NEW, "name", "只有名稱"); assert "還沒填路徑" in app.status_text
 app.draft = {"type": "", "name": "", "path": "", "screen": 0}; app.refresh_items()
+assert w.vlc_command("V", "p.m3u8", True) == ["V", "--random", "--loop", "p.m3u8"]
+assert w.vlc_command("V", "p.m3u8", False) == ["V", "--loop", "p.m3u8"]
+assert w.find_vlc("/no/such") == ""
+fake = os.path.join(tmp, "vlc.exe"); open(fake, "w").close()
+assert w.find_vlc(fake) == fake
 print("v0.7 ok")
 
 # 精簡模式與設定

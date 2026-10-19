@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.7"
+APP_VERSION = "v0.8"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -38,6 +38,7 @@ IS_WIN = sys.platform == "win32"
 TYPES = ["App", "資料夾", "檔案", "網址", "YouTube最新", "音樂資料夾"]
 NOTILE_TYPES = {"音樂資料夾"}   # 開了就好，不參與排版
 NOTILE = -1
+DEFAULT_VLC = r"C:\Program Files\VideoLAN\VLC\vlc.exe"
 EXCLUDE = set()                 # 本工具自己的視窗，找視窗時要略過
 SCREEN_LABEL = {0: "跟隨清單", 1: "螢幕1", 2: "螢幕2"}
 SCREEN_FROM = {v: k for k, v in SCREEN_LABEL.items()}
@@ -99,7 +100,8 @@ def load_config(path=None):
     cfg.setdefault("geometry", "")
     cfg.setdefault("music_shuffle", True)
     cfg.setdefault("opened", {})
-    cfg.setdefault("music_one", False)
+    cfg.setdefault("music_vlc", True)
+    cfg.setdefault("vlc_path", DEFAULT_VLC)
     cfg.setdefault("music_sub", True)
     if cfg.get("current") not in [l["id"] for l in cfg["lists"]]:
         cfg["current"] = cfg["lists"][0]["id"]
@@ -729,6 +731,26 @@ def music_files(folder, sub=True):
     return sorted(out)
 
 
+def find_vlc(path=""):
+    """找 VLC：先用設定裡的位置，再找常見的安裝位置；找不到回傳空字串。"""
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    for c in (path, DEFAULT_VLC, os.path.join(pf, "VideoLAN", "VLC", "vlc.exe"),
+              os.path.join(pf86, "VideoLAN", "VLC", "vlc.exe")):
+        if c and os.path.isfile(c):
+            return c
+    return ""
+
+
+def vlc_command(vlc, playlist, shuffle=True):
+    """VLC 的指令列：隨機（可選）、整份清單循環，開了就自動播放。"""
+    args = [vlc]
+    if shuffle:
+        args.append("--random")
+    args += ["--loop", playlist]
+    return args
+
+
 def build_playlist(files, shuffle=True, dest=None):
     files = list(files)
     if shuffle:
@@ -759,15 +781,18 @@ def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
         files = music_files(p, opts.get("music_sub", True))
         if not files:
             raise RuntimeError("資料夾裡沒有音樂檔")
-        if opts.get("music_one"):
-            # 逐首開啟：直接開一首，避開媒體播放器讀不到播放清單裡檔案（沒有存取權限）的問題
-            one = random.choice(files) if opts.get("music_shuffle", True) else files[0]
-            log("音樂（逐首）：%s 找到 %d 首，開啟 %s" % (p, len(files), one))
-            play_file(one)
+        vlc = find_vlc(opts.get("vlc_path", "")) if opts.get("music_vlc", True) else ""
+        if vlc:
+            # VLC 讀檔沒有媒體播放器那種權限限制，可以連續播放整個資料夾
+            pl = build_playlist(files, False, os.path.join(tempfile.gettempdir(), "WorkspaceLauncher", "music.m3u8"))
+            cmd = vlc_command(vlc, pl, opts.get("music_shuffle", True))
+            log("音樂（VLC）：%s 找到 %d 首，%s" % (p, len(files), cmd))
+            subprocess.Popen(cmd)
         else:
-            pl = build_playlist(files, opts.get("music_shuffle", True))
-            log("音樂：%s 找到 %d 首，播放清單 %s" % (p, len(files), pl))
-            play_file(pl)
+            # 沒有 VLC：直接開一首，等於你在檔案總管點兩下（用「開啟」動作，不是「播放」）
+            one = random.choice(files) if opts.get("music_shuffle", True) else files[0]
+            log("音樂（預設播放器）：%s 找到 %d 首，開啟 %s" % (p, len(files), one))
+            os.startfile(one)
         if info is not None:     # 記下播放器視窗：之後放到螢幕2右下角、再按不重播
             t0, h = time.time(), None
             while time.time() - t0 < 10 and not h:
@@ -1541,7 +1566,7 @@ class App:
         self.var_auto = tk.BooleanVar(value=self.cfg.get("autostart", False))
         self.var_shuffle = tk.BooleanVar(value=self.cfg.get("music_shuffle", True))
         self.var_sub = tk.BooleanVar(value=self.cfg.get("music_sub", True))
-        self.var_one = tk.BooleanVar(value=self.cfg.get("music_one", False))
+        self.var_vlc = tk.BooleanVar(value=self.cfg.get("music_vlc", True))
         tk.Label(self.settings, text="設定", bg=P["bg"], fg=P["tx"], font=self.font_bold).pack(anchor="w", padx=16, pady=(14, 8))
         ttk.Checkbutton(self.settings, text="開機時自動啟動工具（預設關閉，勾選立刻生效，取消即移除）",
                         variable=self.var_auto, command=self.on_autostart).pack(anchor="w", padx=16, pady=4)
@@ -1555,10 +1580,16 @@ class App:
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
         ttk.Checkbutton(self.settings, text="音樂資料夾：包含子資料夾", variable=self.var_sub,
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
-        ttk.Checkbutton(self.settings, text="音樂資料夾：逐首開啟（媒體播放器出現「沒有存取檔案的權限」時勾選）",
-                        variable=self.var_one, command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
-        tk.Label(self.settings, text="　或到媒體播放器「設定 → 媒體庫」把音樂資料夾加進去，就能正常播放整個資料夾。",
-                 bg=P["bg"], fg=P["mut"], font=self.font_small, justify="left").pack(anchor="w", padx=16)
+        ttk.Checkbutton(self.settings, text="音樂資料夾：用 VLC 播放，連續播放整個資料夾（取消則用預設播放器開一首）",
+                        variable=self.var_vlc, command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
+        row2 = tk.Frame(self.settings, bg=P["bg"])
+        row2.pack(anchor="w", padx=16, pady=2)
+        tk.Label(row2, text="　VLC 位置：", bg=P["bg"], fg=P["sub"], font=self.font_small).pack(side="left")
+        self.ent_vlc = ttk.Entry(row2, width=46, font=self.font_small)
+        self.ent_vlc.insert(0, self.cfg.get("vlc_path", DEFAULT_VLC))
+        self.ent_vlc.pack(side="left")
+        self.ent_vlc.bind("<Return>", lambda e: self.on_music_opts())
+        self.ent_vlc.bind("<FocusOut>", lambda e: self.on_music_opts())
         FlatButton(self.settings, self, text="開啟紀錄檔資料夾", glyph="back", tip="開啟紀錄檔資料夾",
                    command=self.open_log_dir).pack(anchor="w", padx=16, pady=(8, 0))
         FlatButton(self.settings, self, text="返回", glyph="back", tip="返回", command=self.hide_settings).pack(anchor="w", padx=16, pady=12)
@@ -2220,7 +2251,7 @@ class App:
     # ---- 執行與排列 ----
     def music_opts(self):
         return {"music_shuffle": self.cfg.get("music_shuffle", True), "music_sub": self.cfg.get("music_sub", True),
-                "music_one": self.cfg.get("music_one", False)}
+                "music_vlc": self.cfg.get("music_vlc", True), "vlc_path": self.cfg.get("vlc_path", DEFAULT_VLC)}
 
     def place_one(self, lst, iid, hwnd, full=False):
         it = next((i for i in lst["items"] if i["id"] == iid), None)
@@ -2554,7 +2585,8 @@ class App:
     def on_music_opts(self):
         self.cfg["music_shuffle"] = bool(self.var_shuffle.get())
         self.cfg["music_sub"] = bool(self.var_sub.get())
-        self.cfg["music_one"] = bool(self.var_one.get())
+        self.cfg["music_vlc"] = bool(self.var_vlc.get())
+        self.cfg["vlc_path"] = self.ent_vlc.get().strip().strip('"') or DEFAULT_VLC
         self.save()
 
 
