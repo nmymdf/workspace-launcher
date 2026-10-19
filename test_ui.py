@@ -280,6 +280,10 @@ assert w.vlc_command("V", "p.m3u8", False) == ["V", "--loop", "p.m3u8"]
 assert w.find_vlc("/no/such") == ""
 fake = os.path.join(tmp, "vlc.exe"); open(fake, "w").close()
 assert w.find_vlc(fake) == fake
+pl8 = w.build_playlist(["a.mp3", "b.mp3"], False, os.path.join(tmp, "x.m3u8"), bom=False)
+assert not open(pl8, "rb").read().startswith(b"\xef\xbb\xbf")
+pl3 = w.build_playlist(["a.mp3"], False, os.path.join(tmp, "y.m3u"))
+assert open(pl3, "rb").read().startswith(b"\xef\xbb\xbf")
 print("v0.7 ok")
 
 # 精簡模式與設定
