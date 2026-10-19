@@ -264,6 +264,17 @@ for _ in range(100):
 assert opens == [single["id"]], opens
 print("v0.6 單獨開啟 ok")
 
+# v0.7：存檔提示、逐首開啟選項、單一執行
+assert app.cfg["music_one"] is False and app.music_opts()["music_one"] is False
+app.var_one.set(True); app.on_music_opts()
+assert app.cfg["music_one"] is True and app.music_opts()["music_one"] is True
+assert app.saved_lbl.cget("text").startswith("已儲存 ")
+assert w.ensure_single_instance() is True
+app.draft = {"type": "", "name": "", "path": "", "screen": 0}
+app.commit_value(w.NEW, "name", "只有名稱"); assert "還沒填路徑" in app.status_text
+app.draft = {"type": "", "name": "", "path": "", "screen": 0}; app.refresh_items()
+print("v0.7 ok")
+
 # 精簡模式與設定
 for geo in ("300x200", "240x130", "500x420", "1000x660"):
     root.geometry(geo); pump(8)

@@ -30,7 +30,7 @@ except Exception:  # 沒有拖放套件時，其他功能照常
     HAS_DND = False
 
 APP_NAME = "工作清單啟動器"
-APP_VERSION = "v0.6"
+APP_VERSION = "v0.7"
 AUTHOR = "作者：ArchieKUO"
 GOLD = "#B8912A"
 IS_WIN = sys.platform == "win32"
@@ -99,6 +99,7 @@ def load_config(path=None):
     cfg.setdefault("geometry", "")
     cfg.setdefault("music_shuffle", True)
     cfg.setdefault("opened", {})
+    cfg.setdefault("music_one", False)
     cfg.setdefault("music_sub", True)
     if cfg.get("current") not in [l["id"] for l in cfg["lists"]]:
         cfg["current"] = cfg["lists"][0]["id"]
@@ -758,9 +759,15 @@ def open_item(item, exclude=(), opts=None, on_cid=None, info=None):
         files = music_files(p, opts.get("music_sub", True))
         if not files:
             raise RuntimeError("資料夾裡沒有音樂檔")
-        pl = build_playlist(files, opts.get("music_shuffle", True))
-        log("音樂：%s 找到 %d 首，播放清單 %s" % (p, len(files), pl))
-        play_file(pl)
+        if opts.get("music_one"):
+            # 逐首開啟：直接開一首，避開媒體播放器讀不到播放清單裡檔案（沒有存取權限）的問題
+            one = random.choice(files) if opts.get("music_shuffle", True) else files[0]
+            log("音樂（逐首）：%s 找到 %d 首，開啟 %s" % (p, len(files), one))
+            play_file(one)
+        else:
+            pl = build_playlist(files, opts.get("music_shuffle", True))
+            log("音樂：%s 找到 %d 首，播放清單 %s" % (p, len(files), pl))
+            play_file(pl)
         if info is not None:     # 記下播放器視窗：之後放到螢幕2右下角、再按不重播
             t0, h = time.time(), None
             while time.time() - t0 < 10 and not h:
@@ -1281,6 +1288,11 @@ class App:
             save_config(self.cfg, self.cfg_file)
         except Exception as ex:
             self.set_status("存檔失敗：%s" % ex)
+            return
+        try:
+            self.saved_lbl.config(text="已儲存 %s" % time.strftime("%H:%M:%S"))
+        except Exception:
+            pass
 
     def status_tip(self, e):
         t = self.status_text
@@ -1411,6 +1423,8 @@ class App:
         row.pack(fill="x")
         tk.Label(row, text="%s　%s" % (AUTHOR, APP_VERSION), bg=P["bg"], fg=P["gold"],
                  font=self.font_italic).pack(side="right", padx=12)
+        self.saved_lbl = tk.Label(row, text="", bg=P["bg"], fg=P["mut"], font=self.font_small)
+        self.saved_lbl.pack(side="right")
         self.status = tk.Label(row, text=self.status_text, anchor="w", bg=P["bg"], fg=P["mut"], font=self.font_small)
         self.status.pack(side="left", padx=12, pady=5)
         self.status.bind("<Enter>", self.status_tip)
@@ -1527,6 +1541,7 @@ class App:
         self.var_auto = tk.BooleanVar(value=self.cfg.get("autostart", False))
         self.var_shuffle = tk.BooleanVar(value=self.cfg.get("music_shuffle", True))
         self.var_sub = tk.BooleanVar(value=self.cfg.get("music_sub", True))
+        self.var_one = tk.BooleanVar(value=self.cfg.get("music_one", False))
         tk.Label(self.settings, text="設定", bg=P["bg"], fg=P["tx"], font=self.font_bold).pack(anchor="w", padx=16, pady=(14, 8))
         ttk.Checkbutton(self.settings, text="開機時自動啟動工具（預設關閉，勾選立刻生效，取消即移除）",
                         variable=self.var_auto, command=self.on_autostart).pack(anchor="w", padx=16, pady=4)
@@ -1540,6 +1555,10 @@ class App:
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
         ttk.Checkbutton(self.settings, text="音樂資料夾：包含子資料夾", variable=self.var_sub,
                         command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
+        ttk.Checkbutton(self.settings, text="音樂資料夾：逐首開啟（媒體播放器出現「沒有存取檔案的權限」時勾選）",
+                        variable=self.var_one, command=self.on_music_opts).pack(anchor="w", padx=16, pady=4)
+        tk.Label(self.settings, text="　或到媒體播放器「設定 → 媒體庫」把音樂資料夾加進去，就能正常播放整個資料夾。",
+                 bg=P["bg"], fg=P["mut"], font=self.font_small, justify="left").pack(anchor="w", padx=16)
         FlatButton(self.settings, self, text="開啟紀錄檔資料夾", glyph="back", tip="開啟紀錄檔資料夾",
                    command=self.open_log_dir).pack(anchor="w", padx=16, pady=(8, 0))
         FlatButton(self.settings, self, text="返回", glyph="back", tip="返回", command=self.hide_settings).pack(anchor="w", padx=16, pady=12)
@@ -2045,6 +2064,8 @@ class App:
             self.draft_err = ""
             self.try_save_draft()
             self.refresh_blank_row()
+            if not self.draft["path"] and (self.draft["name"] or self.draft["type"]):
+                self.set_status("空白列：還沒填路徑，路徑填好才會自動儲存")
             return
         it = self.find_item(iid)
         if not it:
@@ -2198,7 +2219,8 @@ class App:
 
     # ---- 執行與排列 ----
     def music_opts(self):
-        return {"music_shuffle": self.cfg.get("music_shuffle", True), "music_sub": self.cfg.get("music_sub", True)}
+        return {"music_shuffle": self.cfg.get("music_shuffle", True), "music_sub": self.cfg.get("music_sub", True),
+                "music_one": self.cfg.get("music_one", False)}
 
     def place_one(self, lst, iid, hwnd, full=False):
         it = next((i for i in lst["items"] if i["id"] == iid), None)
@@ -2532,10 +2554,38 @@ class App:
     def on_music_opts(self):
         self.cfg["music_shuffle"] = bool(self.var_shuffle.get())
         self.cfg["music_sub"] = bool(self.var_sub.get())
+        self.cfg["music_one"] = bool(self.var_one.get())
         self.save()
 
 
+_MUTEX = None
+
+
+def ensure_single_instance():
+    """已經有一份在執行時，把它叫到最前面，回傳 False（這一份就不用開了）。"""
+    global _MUTEX
+    if not IS_WIN:
+        return True
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        _MUTEX = k32.CreateMutexW(None, False, "Local\\ArchieKUO.WorkspaceLauncher")
+        if ctypes.get_last_error() != 183:      # ERROR_ALREADY_EXISTS
+            return True
+        for h, title, cls, pid in list_windows():
+            if title.startswith(APP_NAME):
+                if user32.IsIconic(h):
+                    user32.ShowWindow(h, 9)
+                user32.SetForegroundWindow(h)
+                break
+        return False
+    except Exception:
+        return True
+
+
 def main():
+    if not ensure_single_instance():
+        return
     root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
     App(root, autostart_run="--autostart" in sys.argv)
     root.mainloop()
